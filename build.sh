@@ -142,7 +142,7 @@ fi
 rm -rf "${AK3_DIR}/kernels" "${AK3_DIR}/dtb" "${AK3_DIR}/dtbo.img" "${AK3_DIR}/Image" "${AK3_DIR}/.git" "${AK3_DIR}/README.md" "${AK3_DIR}/LICENSE" "${AK3_DIR}/modules" "${AK3_DIR}/patch" "${AK3_DIR}/ramdisk"
 
 cd "${AK3_DIR}"
-ZIP_NAME="${KERNEL_NAME}-${DEVICE}-${BUILD_VARIANT^}-${DATE}.zip"
+ZIP_NAME="${KERNEL_NAME}-${DEVICE}-Perf-${DATE}.zip"
 zip -r9 "${OUT_DIR}/${ZIP_NAME}" *
 
 echo "================================================="
@@ -153,9 +153,9 @@ echo "================================================="
 # Copy to Windows Desktop and Downloads if running under WSL
 if [ -d "/mnt/c/Users/ARUN/Desktop" ]; then
     cp -f "${OUT_DIR}/${ZIP_NAME}" "/mnt/c/Users/ARUN/Desktop/${ZIP_NAME}"
-    cp -f "${OUT_DIR}/${ZIP_NAME}" "/mnt/c/Users/ARUN/Desktop/Ignis-Rei-munch-Aosp.zip"
+    cp -f "${OUT_DIR}/${ZIP_NAME}" "/mnt/c/Users/ARUN/Desktop/Ignis-Rei-munch-Perf.zip"
     echo "  Copied to Desktop: C:\\Users\\ARUN\\Desktop\\${ZIP_NAME}"
 fi
 if [ -d "/mnt/c/Users/ARUN/Downloads" ]; then
-    cp -f "${OUT_DIR}/${ZIP_NAME}" "/mnt/c/Users/ARUN/Downloads/Ignis-Rei-munch-Aosp.zip"
+    cp -f "${OUT_DIR}/${ZIP_NAME}" "/mnt/c/Users/ARUN/Downloads/Ignis-Rei-munch-Perf.zip"
 fi

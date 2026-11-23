@@ -39,7 +39,8 @@ home="$AKHOME";
 
 ui_print " ";
 ui_print "  ===========================================";
-ui_print "  |       Ignis-Rei Kernel | munch          |";
+ui_print "  |    Ignis-Rei Kernel | munch [PERF]      |";
+ui_print "  |      Extreme Gaming / OC Edition        |";
 ui_print "  |          Android 11 - 17                |";
 ui_print "  ===========================================";
 ui_print " ";

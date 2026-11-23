@@ -14,6 +14,8 @@
 #include <linux/msm-bus.h>
 #include <linux/regulator/consumer.h>
 #include <linux/nvmem-consumer.h>
+#include <linux/pm_opp.h>
+#include <dt-bindings/regulator/qcom,rpmh-regulator-levels.h>
 #include <soc/qcom/scm.h>
 
 #include "adreno.h"
@@ -1126,6 +1128,65 @@ static int adreno_of_get_legacy_pwrlevels(struct adreno_device *adreno_dev,
 	return 0;
 }
 
+static void adreno_inject_overclock_pwrlevels(struct adreno_device *adreno_dev)
+{
+	struct kgsl_device *device = KGSL_DEVICE(adreno_dev);
+	struct kgsl_pwrctrl *pwr = &device->pwrctrl;
+	struct kgsl_pwrlevel top;
+	int i, cur = 0, shift = 0;
+	bool has_800 = false;
+	bool has_683 = false;
+
+	if (!adreno_is_a650_family(adreno_dev))
+		return;
+
+	for (i = 0; i < pwr->num_pwrlevels; i++) {
+		if (pwr->pwrlevels[i].gpu_freq == 800000000)
+			has_800 = true;
+		if (pwr->pwrlevels[i].gpu_freq == 683000000)
+			has_683 = true;
+	}
+
+	if (has_800 && has_683)
+		return;
+
+	if (!has_683)
+		shift++;
+	if (!has_800)
+		shift++;
+
+	if (pwr->num_pwrlevels + shift > KGSL_MAX_PWRLEVELS)
+		return;
+
+	top = pwr->pwrlevels[0];
+
+	for (i = pwr->num_pwrlevels - 1; i >= 0; i--) {
+		pwr->pwrlevels[i + shift] = pwr->pwrlevels[i];
+	}
+
+	if (!has_800) {
+		pwr->pwrlevels[cur] = top;
+		pwr->pwrlevels[cur].gpu_freq = 800000000;
+		dev_pm_opp_add(&device->pdev->dev, 800000000, RPMH_REGULATOR_LEVEL_TURBO_L1);
+		cur++;
+	}
+	if (!has_683) {
+		pwr->pwrlevels[cur] = top;
+		pwr->pwrlevels[cur].gpu_freq = 683000000;
+		dev_pm_opp_add(&device->pdev->dev, 683000000, RPMH_REGULATOR_LEVEL_TURBO);
+		cur++;
+	}
+
+	pwr->num_pwrlevels += shift;
+
+	if (pwr->default_pwrlevel >= 0)
+		pwr->default_pwrlevel += shift;
+	if (pwr->active_pwrlevel >= 0)
+		pwr->active_pwrlevel += shift;
+
+	dev_info(device->dev, "KGSL: Unlocked Adreno 650 Overclock levels (683 MHz, 800 MHz)\n");
+}
+
 static int adreno_of_get_pwrlevels(struct adreno_device *adreno_dev,
 		struct device_node *parent)
 {
@@ -1239,6 +1300,8 @@ static int adreno_of_get_power(struct adreno_device *adreno_dev,
 
 	if (adreno_of_get_pwrlevels(adreno_dev, node))
 		return -EINVAL;
+
+	adreno_inject_overclock_pwrlevels(adreno_dev);
 
 	/* Get context aware DCVS properties */
 	adreno_of_get_ca_aware_properties(adreno_dev, node);
