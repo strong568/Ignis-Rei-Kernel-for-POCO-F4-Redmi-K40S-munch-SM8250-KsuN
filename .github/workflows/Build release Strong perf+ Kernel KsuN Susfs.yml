@@ -18,7 +18,7 @@ on:
           - aosp
           - stock
       build_type:
-        description: 'Loại Kernel (all = build cả 3: ksun-susfs, ksun-nosusfs, noroot)'
+        description: 'Loại Kernel (all = build cả 3: noroot, ksun-nosusfs, ksun-susfs)'
         required: true
         default: 'all'
         type: choice
@@ -59,10 +59,217 @@ jobs:
           echo "tag=Strong-perf-Ignis-Rei-munch-${SAFE_BRANCH}-${BUILD_DATE}" >> "$GITHUB_OUTPUT"
           echo "date=${DISPLAY_DATE}" >> "$GITHUB_OUTPUT"
 
+      - name: Create SuSFS Auto-Patch Helper Script
+        run: |
+          cat << 'PYEOF' > /tmp/apply_susfs.py
+          import os, re, shutil, subprocess, sys
+
+          root = sys.argv[1]
+          susfs_repo = sys.argv[2]
+          wild_repo = sys.argv[3]
+          mode = sys.argv[4]  # "preflight" hoặc "apply"
+
+          kernel_patch = os.path.join(susfs_repo, "kernel_patches", "50_add_susfs_in_kernel-4.19.patch")
+          if not os.path.isfile(kernel_patch):
+              print(f"::error::Không tìm thấy {kernel_patch}")
+              sys.exit(1)
+
+          def run(cmd, cwd=None, check=True):
+              print("+", " ".join(cmd))
+              return subprocess.run(cmd, cwd=cwd, check=check)
+
+          def copy_tree(src, dst):
+              for dirpath, _, filenames in os.walk(src):
+                  rel = os.path.relpath(dirpath, src)
+                  out_dir = os.path.join(dst, rel) if rel != "." else dst
+                  os.makedirs(out_dir, exist_ok=True)
+                  for fn in filenames:
+                      shutil.copy2(os.path.join(dirpath, fn), os.path.join(out_dir, fn))
+
+          def autofix_kernel_rejects(work_dir):
+              # 1) Auto-fix kernel/sys.c (susfs_spoof_uname trong SYSCALL_DEFINE1(newuname, ...))
+              sys_c = os.path.join(work_dir, "kernel/sys.c")
+              sys_rej = sys_c + ".rej"
+              if os.path.exists(sys_rej) and os.path.exists(sys_c):
+                  with open(sys_c, "r") as f:
+                      src = f.read()
+                  changed = False
+                  if "susfs_spoof_uname" not in src:
+                      target_def = "SYSCALL_DEFINE1(newuname, struct new_utsname __user *, name)"
+                      if target_def in src:
+                          src = src.replace(
+                              target_def,
+                              "#ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME\nextern void susfs_spoof_uname(struct new_utsname* tmp);\n#endif\n" + target_def,
+                              1
+                          )
+                          pos = src.find(target_def)
+                          sub = src[pos:]
+                          m = re.search(r'(memcpy\(&tmp,\s*utsname\(\),\s*sizeof\(tmp\)\);)', sub)
+                          if m:
+                              ins = m.group(1) + "\n#ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME\n\tsusfs_spoof_uname(&tmp);\n#endif"
+                              src = src[:pos] + sub[:m.start()] + ins + sub[m.end():]
+                              changed = True
+                  if changed:
+                      with open(sys_c, "w") as f:
+                          f.write(src)
+                      os.remove(sys_rej)
+                      print(">>> Auto-fixed kernel/sys.c thành công!")
+
+              # 2) Auto-fix #include <linux/susfs_def.h> trong fs/proc/task_mmu.c
+              mmu_c = os.path.join(work_dir, "fs/proc/task_mmu.c")
+              mmu_rej = mmu_c + ".rej"
+              if os.path.exists(mmu_rej) and os.path.exists(mmu_c):
+                  with open(mmu_rej, "r") as f:
+                      rej = f.read()
+                  with open(mmu_c, "r") as f:
+                      src = f.read()
+                  hunks = re.split(r'(?=^@@ )', rej, flags=re.M)
+                  header = hunks[0]
+                  remaining = []
+                  for h in hunks[1:]:
+                      if "susfs_def.h" in h and "#include" in h:
+                          if "susfs_def.h" not in src:
+                              for anchor in ("#include <linux/mm_inline.h>", "#include <linux/uaccess.h>", "#include <linux/pkeys.h>"):
+                                  if anchor in src:
+                                      src = src.replace(
+                                          anchor,
+                                          anchor + "\n#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT\n#include <linux/susfs_def.h>\n#endif",
+                                          1
+                                      )
+                                      print(">>> Auto-fixed #include <linux/susfs_def.h> trong fs/proc/task_mmu.c")
+                                      break
+                      else:
+                          remaining.append(h)
+                  with open(mmu_c, "w") as f:
+                      f.write(src)
+                  if not remaining:
+                      os.remove(mmu_rej)
+                  else:
+                      with open(mmu_rej, "w") as f:
+                          f.write(header + "".join(remaining))
+
+          # Xác định thư mục làm việc (preflight chỉ copy các file bị chạm để test trong vài giây)
+          if mode == "preflight":
+              work_dir = "/tmp/susfs_preflight"
+              shutil.rmtree(work_dir, ignore_errors=True)
+              os.makedirs(work_dir, exist_ok=True)
+              with open(kernel_patch, "r") as f:
+                  patch_txt = f.read()
+              touched = set(re.findall(r'^(?:--- a/|\+\+\+ b/)([^\s\t]+)', patch_txt, flags=re.M))
+              for rel in touched:
+                  src_file = os.path.join(root, rel)
+                  if os.path.isfile(src_file):
+                      dst_file = os.path.join(work_dir, rel)
+                      os.makedirs(os.path.dirname(dst_file), exist_ok=True)
+                      shutil.copy2(src_file, dst_file)
+          else:
+              work_dir = root
+
+          # Chép mã nguồn lõi SuSFS vào kernel
+          copy_tree(os.path.join(susfs_repo, "kernel_patches", "fs"), os.path.join(work_dir, "fs"))
+          copy_tree(os.path.join(susfs_repo, "kernel_patches", "include", "linux"), os.path.join(work_dir, "include", "linux"))
+
+          # Áp patch kernel 4.19
+          with open(kernel_patch, "rb") as pf:
+              subprocess.run(
+                  ["patch", "-p1", "--forward", "--batch", "--fuzz=3"],
+                  cwd=work_dir, stdin=pf, check=False
+              )
+
+          autofix_kernel_rejects(work_dir)
+
+          # Kiểm tra còn .rej nào trong kernel không
+          rej_files = []
+          for dp, _, fns in os.walk(work_dir):
+              for fn in fns:
+                  if fn.endswith(".rej"):
+                      rej_files.append(os.path.join(dp, fn))
+          if rej_files:
+              print("::error::50_add_susfs_in_kernel-4.19.patch vẫn còn file .rej cần xử lý:")
+              for rf in sorted(rej_files):
+                  print(f"================ {os.path.relpath(rf, work_dir)} ================")
+                  with open(rf, "r") as f:
+                      print(f.read())
+              sys.exit(1)
+
+          print(">>> Áp patch SuSFS cho kernel 4.19 thành công (0 .rej)!")
+
+          # Kiểm tra và áp patch SuSFS cho KernelSU-Next
+          ksu_kconfig = os.path.realpath(os.path.join(root, "drivers/kernelsu/Kconfig"))
+          ksu_dir = os.path.dirname(ksu_kconfig)
+          ksu_root = os.path.dirname(ksu_dir) if os.path.basename(ksu_dir) == "kernel" else ksu_dir
+
+          if mode == "preflight":
+              ksu_work = "/tmp/ksu_preflight"
+              shutil.rmtree(ksu_work, ignore_errors=True)
+              shutil.copytree(ksu_root, ksu_work, symlinks=True)
+              target_ksu_root = ksu_work
+              target_ksu_dir = os.path.join(ksu_work, "kernel") if os.path.isdir(os.path.join(ksu_work, "kernel")) else ksu_work
+          else:
+              target_ksu_root = ksu_root
+              target_ksu_dir = ksu_dir
+
+          # Tìm patch KSUN tương thích (ưu tiên patch cho KSUN trong wild_patches rồi đến susfs4ksu)
+          candidates = []
+          for base in (wild_repo, susfs_repo):
+              if not os.path.isdir(base):
+                  continue
+              for dp, _, fns in os.walk(base):
+                  for fn in fns:
+                      low = fn.lower()
+                      if low.endswith(".patch") and ("susfs" in low) and ("ksu" in low or "next" in low):
+                          candidates.append(os.path.join(dp, fn))
+          candidates.sort(key=lambda p: (0 if "next" in os.path.basename(p).lower() else 1, p))
+
+          if not candidates:
+              print("::error::Không tìm thấy file patch SuSFS cho KernelSU-Next!")
+              sys.exit(1)
+
+          ksun_patch = candidates[0]
+          print(f">>> Đang áp patch KernelSU-Next: {ksun_patch}")
+          with open(ksun_patch, "r") as f:
+              kpatch_txt = f.read()
+
+          patch_cwd = target_ksu_root if re.search(r'^\+\+\+ b/kernel/', kpatch_txt, flags=re.M) else target_ksu_dir
+          with open(ksun_patch, "rb") as pf:
+              subprocess.run(
+                  ["patch", "-p1", "--forward", "--batch", "--fuzz=3"],
+                  cwd=patch_cwd, stdin=pf, check=False
+              )
+
+          ksu_rejs = []
+          for dp, _, fns in os.walk(target_ksu_root):
+              for fn in fns:
+                  if fn.endswith(".rej"):
+                      ksu_rejs.append(os.path.join(dp, fn))
+          if ksu_rejs:
+              print(f"::error::Patch {os.path.basename(ksun_patch)} bị conflict với KernelSU-Next v3.4.2! Danh sách .rej:")
+              for rf in sorted(ksu_rejs):
+                  print(f"================ {os.path.relpath(rf, target_ksu_root)} ================")
+                  with open(rf, "r") as f:
+                      print(f.read())
+              sys.exit(1)
+
+          print(">>> Áp patch SuSFS cho KernelSU-Next thành công (0 .rej)!")
+          PYEOF
+
+      - name: Pre-flight Check SuSFS Patch (Fail-Fast ~20s)
+        if: ${{ (github.event.inputs.build_type || 'all') == 'all' || (github.event.inputs.build_type || 'all') == 'ksun-susfs' }}
+        run: |
+          if grep -rq "config KSU_SUSFS" drivers/kernelsu/ KernelSU-Next/ KernelSU/ fs/ 2>/dev/null; then
+            echo ">>> Nhánh đã tích hợp sẵn SuSFS, bỏ qua bước tải patch."
+          else
+            echo ">>> Tải susfs4ksu (kernel-4.19) & kiểm tra nhanh patch trước khi tải Clang..."
+            rm -rf /tmp/susfs4ksu /tmp/wild_patches
+            git clone --depth=1 -b kernel-4.19 https://gitlab.com/simonpunk/susfs4ksu.git /tmp/susfs4ksu
+            git clone --depth=1 https://github.com/WildKernels/kernel_patches.git /tmp/wild_patches || true
+            python3 /tmp/apply_susfs.py "$GITHUB_WORKSPACE" /tmp/susfs4ksu /tmp/wild_patches preflight
+          fi
+
       - name: Install Build Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y bc bison build-essential curl flex git jq patch libssl-dev libelf-dev libncurses-dev zip gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
+          sudo apt-get install -y bc bison build-essential curl flex git jq patch python3 libssl-dev libelf-dev libncurses-dev zip gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
 
       - name: Download Clang Toolchain
         run: |
@@ -89,7 +296,7 @@ jobs:
           sed -i -E 's/(--set-str[[:space:]]+LOCALVERSION[[:space:]]+)("[^"]*"|'\''[^'\'']*'\''|[^[:space:]]+)/\1"-perf"/g' build.sh
           sed -i -E 's/\bLOCALVERSION=("[^"]*"|'\''[^'\'']*'\''|[^[:space:]]+)/LOCALVERSION=""/g' build.sh
 
-      - name: Compile and Package Kernel (KSU-Next SuSFS / No-SuSFS / No-Root)
+      - name: Compile and Package Kernel (No-Root / KSU-Next No-SuSFS / KSU-Next SuSFS)
         run: |
           chmod +x build.sh
           mkdir -p release_zips
@@ -105,8 +312,35 @@ jobs:
           VARIANT="${{ github.event.inputs.variant || 'both' }}"
           BUILD_TYPE="${{ github.event.inputs.build_type || 'all' }}"
 
+          verify_config_flag() {
+            local mode="$1" # "must_on" hoặc "must_off"
+            local flag="$2"
+            local found=0
+            for cfg in out/.config out/*/.config; do
+              [ -f "$cfg" ] || continue
+              found=1
+              if [ "$mode" = "must_on" ] && ! grep -q "^${flag}=y" "$cfg"; then
+                echo "::error::${flag}=y không được bật trong ${cfg}!"
+                exit 1
+              fi
+              if [ "$mode" = "must_off" ] && grep -q "^${flag}=y" "$cfg"; then
+                echo "::error::${flag}=y vẫn đang bật trong ${cfg}!"
+                exit 1
+              fi
+            done
+            if [ "$found" -eq 0 ]; then
+              echo "::warning::Không tìm thấy file .config trong out/ để kiểm tra ${flag}"
+            fi
+          }
+
+          print_kernel_release() {
+            for kr in out/include/config/kernel.release out/*/include/config/kernel.release; do
+              [ -f "$kr" ] && echo ">>> Kernel Release (${kr}): $(cat "$kr")"
+            done
+          }
+
           # ==========================================
-          # 1. BUILD NO-ROOT (CONFIG_KSU=n)
+          # 1. BUILD NO-ROOT
           # ==========================================
           if [ "$BUILD_TYPE" = "noroot" ] || [ "$BUILD_TYPE" = "all" ]; then
             echo "=========================================="
@@ -116,9 +350,7 @@ jobs:
             sed -i '/^CONFIG_KSU/d' "$MUNCH_CFG"
             sed -i '/^# CONFIG_KSU/d' "$MUNCH_CFG"
             cat << 'EOF' >> "$MUNCH_CFG"
-          CONFIG_KSU=n
           # CONFIG_KSU is not set
-          CONFIG_KSU_SUSFS=n
           # CONFIG_KSU_SUSFS is not set
           EOF
 
@@ -126,17 +358,15 @@ jobs:
               echo 'obj-$(CONFIG_KSU) += kernelsu.o' > "$KSU_KBUILD"
             fi
 
-            rm -f out/*.zip
+            rm -rf out/aosp out/stock out/*.zip
             CLANG_PATH="${GITHUB_WORKSPACE}/clang" ./build.sh "$VARIANT"
 
             if [ -f "/tmp/Kbuild.bak" ] && [ -n "$KSU_KBUILD" ]; then
               cp /tmp/Kbuild.bak "$KSU_KBUILD"
             fi
 
-            if [ -f "out/.config" ] && grep -q "^CONFIG_KSU=y" out/.config; then
-              echo "::error::CONFIG_KSU=y vẫn đang bật trong out/.config khi build bản No-Root!"
-              exit 1
-            fi
+            verify_config_flag must_off CONFIG_KSU
+            print_kernel_release
 
             for f in out/*.zip; do
               [ -e "$f" ] || continue
@@ -157,19 +387,17 @@ jobs:
             sed -i '/^# CONFIG_KSU/d' "$MUNCH_CFG"
             cat << 'EOF' >> "$MUNCH_CFG"
           CONFIG_KSU=y
-          CONFIG_KSU_MANUAL_HOOK=n
+          # CONFIG_KSU_MANUAL_HOOK is not set
           CONFIG_KSU_SYSCALL_TABLE_HOOK=y
-          CONFIG_KSU_SUSFS=n
           # CONFIG_KSU_SUSFS is not set
           EOF
 
-            rm -f out/*.zip
+            rm -rf out/aosp out/stock out/*.zip
             CLANG_PATH="${GITHUB_WORKSPACE}/clang" ./build.sh "$VARIANT"
 
-            if [ -f "out/.config" ] && ! grep -q "^CONFIG_KSU=y" out/.config; then
-              echo "::error::CONFIG_KSU=y không được kích hoạt trong out/.config!"
-              exit 1
-            fi
+            verify_config_flag must_on CONFIG_KSU
+            verify_config_flag must_off CONFIG_KSU_SUSFS
+            print_kernel_release
 
             for f in out/*.zip; do
               [ -e "$f" ] || continue
@@ -179,7 +407,7 @@ jobs:
           fi
 
           # ==========================================
-          # 3. BUILD KSU-NEXT SUSFS (Tự động vá nếu chưa có)
+          # 3. BUILD KSU-NEXT SUSFS
           # ==========================================
           if [ "$BUILD_TYPE" = "ksun-susfs" ] || [ "$BUILD_TYPE" = "all" ]; then
             echo "=========================================="
@@ -187,50 +415,27 @@ jobs:
             echo "=========================================="
 
             if ! grep -rq "config KSU_SUSFS" drivers/kernelsu/ KernelSU-Next/ KernelSU/ fs/ 2>/dev/null; then
-              echo ">>> Nhánh chưa có SuSFS, đang tải susfs4ksu (kernel-4.19) và áp patch..."
-              rm -rf /tmp/susfs4ksu /tmp/wild_patches
-              git clone --depth=1 -b kernel-4.19 https://gitlab.com/simonpunk/susfs4ksu.git /tmp/susfs4ksu
-
-              # Chép mã nguồn lõi SuSFS vào kernel
-              cp -rf /tmp/susfs4ksu/kernel_patches/fs/* fs/
-              cp -rf /tmp/susfs4ksu/kernel_patches/include/linux/* include/linux/
-
-              # Áp patch SuSFS cho kernel 4.19
-              if ! patch -p1 --forward --batch < /tmp/susfs4ksu/kernel_patches/50_add_susfs_in_kernel-4.19.patch; then
-                echo "::error::Patch 50_add_susfs_in_kernel-4.19.patch bị conflict với code Ignis-Rei! Danh sách file lỗi (.rej):"
-                find . -name "*.rej" -exec head -n 40 {} +
-                exit 1
-              fi
-
-              # Xác định thư mục thực tế của KernelSU-Next (xử lý cả symlink drivers/kernelsu)
-              KSU_DIR=$(dirname "$(readlink -f drivers/kernelsu/Kconfig)")
-              echo ">>> Thư mục KernelSU-Next: ${KSU_DIR}"
-
-              # Áp patch SuSFS cho KernelSU-Next
-              git clone --depth=1 https://github.com/WildKernels/kernel_patches.git /tmp/wild_patches || true
-              KSUN_PATCH=$(find /tmp/wild_patches /tmp/susfs4ksu -type f \( -name "*susfs*next*.patch" -o -name "10_enable_susfs_for_ksu.patch" \) | head -n 1)
-
-              if [ -n "$KSUN_PATCH" ]; then
-                echo ">>> Áp patch KSU: ${KSUN_PATCH}"
-                if ! patch -d "$KSU_DIR" -p1 --forward --batch < "$KSUN_PATCH"; then
-                  echo "::error::Patch KernelSU-Next SuSFS bị conflict! Danh sách file lỗi (.rej):"
-                  find "$KSU_DIR" -name "*.rej" -exec head -n 40 {} +
-                  exit 1
-                fi
-              else
-                echo "::error::Không tìm thấy file patch SuSFS tương thích KernelSU-Next!"
-                exit 1
-              fi
+              python3 /tmp/apply_susfs.py "$GITHUB_WORKSPACE" /tmp/susfs4ksu /tmp/wild_patches apply
             fi
 
             cp "${MUNCH_CFG}.bak" "$MUNCH_CFG"
             sed -i '/^CONFIG_KSU/d' "$MUNCH_CFG"
             sed -i '/^# CONFIG_KSU/d' "$MUNCH_CFG"
-            cat << 'EOF' >> "$MUNCH_CFG"
+
+            # Tự chọn chế độ hook khớp với kernel/reboot.c để tránh lỗi HAVE_KSU_HOOK của Kbuild
+            if grep -q "ksu_handle_sys_reboot" kernel/reboot.c; then
+              HOOK_BLOCK="CONFIG_KSU_MANUAL_HOOK=y
+          # CONFIG_KSU_SYSCALL_TABLE_HOOK is not set
+          # CONFIG_KSU_KPROBES_HOOK is not set"
+            else
+              echo "::warning::kernel/reboot.c chưa có ksu_handle_sys_reboot -> giữ CONFIG_KSU_SYSCALL_TABLE_HOOK=y."
+              HOOK_BLOCK="# CONFIG_KSU_MANUAL_HOOK is not set
+          CONFIG_KSU_SYSCALL_TABLE_HOOK=y"
+            fi
+
+            cat << EOF >> "$MUNCH_CFG"
           CONFIG_KSU=y
-          CONFIG_KSU_MANUAL_HOOK=y
-          CONFIG_KSU_SYSCALL_TABLE_HOOK=n
-          CONFIG_KSU_KPROBES_HOOK=n
+          ${HOOK_BLOCK}
           CONFIG_KSU_SUSFS=y
           CONFIG_KSU_SUSFS_SUS_PATH=y
           CONFIG_KSU_SUSFS_SUS_MOUNT=y
@@ -247,13 +452,12 @@ jobs:
           CONFIG_KSU_SUSFS_SUS_MAP=y
           EOF
 
-            rm -f out/*.zip
+            rm -rf out/aosp out/stock out/*.zip
             CLANG_PATH="${GITHUB_WORKSPACE}/clang" ./build.sh "$VARIANT"
 
-            if [ -f "out/.config" ] && { ! grep -q "^CONFIG_KSU_SUSFS=y" out/.config || ! grep -q "^CONFIG_KSU_MANUAL_HOOK=y" out/.config; }; then
-              echo "::error::CONFIG_KSU_SUSFS=y hoặc CONFIG_KSU_MANUAL_HOOK=y không được kích hoạt trong out/.config sau khi merge config!"
-              exit 1
-            fi
+            verify_config_flag must_on CONFIG_KSU
+            verify_config_flag must_on CONFIG_KSU_SUSFS
+            print_kernel_release
 
             for f in out/*.zip; do
               [ -e "$f" ] || continue
