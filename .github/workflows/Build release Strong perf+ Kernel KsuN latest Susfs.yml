@@ -469,6 +469,16 @@ jobs:
               ok = (res.returncode == 0) and (not skipped) and (len(rejs) == 0) and (len(missing_syms) == 0)
               return test_root, rejs, ok, skipped, missing_syms
 
+          def ensure_susfs_includes(src):
+              if "linux/susfs.h" in src and "linux/susfs_def.h" in src:
+                  return src
+              inc = "\n#ifdef CONFIG_KSU_SUSFS\n#include <linux/susfs.h>\n#include <linux/susfs_def.h>\n#endif\n"
+              matches = list(re.finditer(r'^\s*#\s*include\s+[<"][^>"]+[>"].*$', src, flags=re.M))
+              if matches:
+                  pos = matches[-1].end()
+                  return src[:pos] + inc + src[pos:]
+              return inc + src
+
           def integrate_susfs_into_ksun(test_dir):
               susfs_h_txt = open(patched_susfs_h, "r", errors="replace").read() if os.path.isfile(patched_susfs_h) else ""
               susfs_def_txt = open(patched_susfs_def_h, "r", errors="replace").read() if os.path.isfile(patched_susfs_def_h) else ""
@@ -583,6 +593,7 @@ jobs:
                   with open(sel_c_path, "r") as f:
                       sel_c = f.read()
                   if "susfs_is_current_ksu_domain" not in sel_c:
+                      sel_c = ensure_susfs_includes(sel_c)
                       sel_c += (
                           '\n#ifdef CONFIG_KSU_SUSFS\n'
                           '#define KERNEL_INIT_DOMAIN "u:r:init:s0"\n'
@@ -662,6 +673,7 @@ jobs:
                   with open(rules_c_path, "r") as f:
                       rules_c = f.read()
                   if "susfs_set_batch_sid" not in rules_c:
+                      rules_c = ensure_susfs_includes(rules_c)
                       rules_c = rules_c.replace(
                           "reset_avc_cache();",
                           "reset_avc_cache();\n#ifdef CONFIG_KSU_SUSFS\n\tsusfs_set_batch_sid();\n#endif",
@@ -676,11 +688,7 @@ jobs:
                   with open(init_c_path, "r") as f:
                       init_c = f.read()
                   if "susfs_init" not in init_c:
-                      init_c = init_c.replace(
-                          '#include "ksu.h"',
-                          '#include "ksu.h"\n#ifdef CONFIG_KSU_SUSFS\n#include <linux/susfs.h>\n#include <linux/susfs_def.h>\n#endif',
-                          1
-                      )
+                      init_c = ensure_susfs_includes(init_c)
                       init_c = init_c.replace(
                           "ksu_feature_init();",
                           "#ifdef CONFIG_KSU_SUSFS\n\tsusfs_init();\n#endif\n\tksu_feature_init();",
@@ -744,13 +752,11 @@ jobs:
                               )
                               ins_pos = m_rb.end()
                               ftxt = ftxt[:ins_pos] + susfs_reboot_block + ftxt[ins_pos:]
-                              if "linux/susfs.h" not in ftxt:
-                                  ftxt = "#ifdef CONFIG_KSU_SUSFS\n#include <linux/susfs.h>\n#include <linux/susfs_def.h>\n#endif\n" + ftxt
+                              ftxt = ensure_susfs_includes(ftxt)
                               print(f">>> Đã chèn SUSFS_MAGIC handler vào {os.path.relpath(fpath, test_dir)}", flush=True)
 
                       if "on_boot_completed();" in ftxt and "susfs_start_sdcard_monitor_fn" not in ftxt and "susfs_start_sdcard_monitor_fn" in susfs_h_txt:
-                          if "linux/susfs.h" not in ftxt:
-                              ftxt = "#ifdef CONFIG_KSU_SUSFS\n#include <linux/susfs.h>\n#include <linux/susfs_def.h>\n#endif\n" + ftxt
+                          ftxt = ensure_susfs_includes(ftxt)
                           ftxt = ftxt.replace(
                               "on_boot_completed();",
                               "on_boot_completed();\n#ifdef CONFIG_KSU_SUSFS\n\t\t\tsusfs_start_sdcard_monitor_fn();\n#endif",
@@ -765,8 +771,7 @@ jobs:
                           )
 
                       if "ret = ksu_get_task_mark(cmd.pid);" in ftxt and "susfs_is_current_proc_umounted" not in ftxt:
-                          if "linux/susfs_def.h" not in ftxt:
-                              ftxt = "#ifdef CONFIG_KSU_SUSFS\n#include <linux/susfs.h>\n#include <linux/susfs_def.h>\n#endif\n" + ftxt
+                          ftxt = ensure_susfs_includes(ftxt)
                           ftxt = ftxt.replace(
                               "ret = ksu_get_task_mark(cmd.pid);",
                               "#ifdef CONFIG_KSU_SUSFS\n\t\tret = susfs_is_current_proc_umounted() ? 0 : 1;\n#else\n\t\tret = ksu_get_task_mark(cmd.pid);\n#endif",
@@ -783,10 +788,7 @@ jobs:
                   with open(umount_c_path, "r") as f:
                       umount_c = f.read()
                   if "susfs_set_current_proc_umounted" not in umount_c:
-                      umount_c = (
-                          "#ifdef CONFIG_KSU_SUSFS\n#include <linux/susfs.h>\n#include <linux/susfs_def.h>\n#endif\n"
-                          + umount_c
-                      )
+                      umount_c = ensure_susfs_includes(umount_c)
                       umount_c = umount_c.replace(
                           "// umount the target mnt",
                           "#ifdef CONFIG_KSU_SUSFS\n\tsusfs_set_current_proc_umounted();\n#endif\n\t// umount the target mnt",
@@ -801,16 +803,13 @@ jobs:
                   with open(sucompat_c_path, "r") as f:
                       sucompat_c = f.read()
                   if "susfs_is_current_proc_umounted" not in sucompat_c:
-                      sucompat_c = sucompat_c.replace(
-                          '#include "feature/sucompat.h"',
-                          '#include "feature/sucompat.h"\n#ifdef CONFIG_KSU_SUSFS\n#include <linux/susfs.h>\n#include <linux/susfs_def.h>\n#endif',
-                          1
-                      )
+                      sucompat_c = ensure_susfs_includes(sucompat_c)
                       for fn_sig in (
                           r'(int\s+ksu_handle_faccessat\s*\([^)]*\)\s*\{)',
                           r'(int\s+ksu_handle_stat\s*\([^)]*\)\s*\{)',
                           r'(long\s+ksu_handle_execve_sucompat\s*\([^)]*\)\s*\{)',
                           r'(int\s+ksu_handle_execveat_sucompat\s*\([^)]*\)\s*\{)',
+                          r'(int\s+ksu_handle_execveat\s*\([^)]*\)\s*\{)',
                       ):
                           sucompat_c = re.sub(
                               fn_sig,
@@ -827,6 +826,7 @@ jobs:
                   with open(app_prof_path, "r") as f:
                       app_prof = f.read()
                   if "susfs_is_current_ksu_domain" not in app_prof:
+                      app_prof = ensure_susfs_includes(app_prof)
                       app_prof = app_prof.replace(
                           "if (cred->euid.val == 0) {",
                           "#ifdef CONFIG_KSU_SUSFS\n\tif (susfs_is_current_ksu_domain()) {\n#else\n\tif (cred->euid.val == 0) {\n#endif",
