@@ -147,25 +147,41 @@ jobs:
                   remaining = []
 
                   for h in hunks[1:]:
-                      # 1a) vfs_kern_mount -> vfs_create_mount
+                      # 1a) vfs_kern_mount -> vfs_create_mount (backport fs_context trên kernel 4.19)
                       if "vfs_kern_mount" in h and "alloc_vfsmnt(" in h:
                           patched_ns = False
-                          m_fn = re.search(r'struct\s+vfsmount\s*\*vfs_create_mount\s*\(\s*struct\s+fs_context\s*\*fc\s*\)\s*\{', src)
+                          m_fn = re.search(
+                              r'struct\s+vfsmount\s*\*\s*vfs_create_mount\s*\(\s*struct\s+fs_context\s*\*\s*fc\s*\)\s*\{',
+                              src
+                          )
                           if m_fn:
                               start = m_fn.end()
                               sub = src[start:start + 2500]
                               m_alloc = re.search(r'^([ \t]*)mnt\s*=\s*alloc_vfsmnt\(([^,\n;]+)\);', sub, flags=re.M)
                               if m_alloc:
                                   ind, arg = m_alloc.group(1), m_alloc.group(2).strip()
-                                  added_code = extract_added_block(h)
-                                  if added_code and "alloc_vfsmnt(" in added_code:
-                                      adapted = re.sub(r'alloc_vfsmnt\(\s*name\b', f'alloc_vfsmnt({arg}', added_code)
-                                      if "bypass_orig_flow:" in adapted and "bypass_orig_flow:;" not in adapted:
-                                          adapted = adapted.replace("bypass_orig_flow:", "bypass_orig_flow:;")
-                                      replacement = f"{adapted}\n#else\n{ind}mnt = alloc_vfsmnt({arg});\n#endif"
+                                  rebuilt = []
+                                  for line in h.splitlines():
+                                      if line.startswith(("@@", "---", "+++")):
+                                          continue
+                                      if line.startswith("+"):
+                                          code_line = line[1:]
+                                          code_line = re.sub(
+                                              r'(\b(?:susfs_alloc_non_unshare_ksu_vfsmnt|alloc_vfsmnt)\s*\(\s*)name\b',
+                                              rf'\1{arg}',
+                                              code_line
+                                          )
+                                          if "bypass_orig_flow:" in code_line and "bypass_orig_flow:;" not in code_line:
+                                              code_line = code_line.replace("bypass_orig_flow:", "bypass_orig_flow:;")
+                                          rebuilt.append(code_line)
+                                      elif line.startswith(" ") and "mnt = alloc_vfsmnt(" in line:
+                                          rebuilt.append(f"{ind}mnt = alloc_vfsmnt({arg});")
+
+                                  if any("susfs_is_current_ksu_domain" in l or "alloc_vfsmnt" in l for l in rebuilt):
+                                      replacement = "\n".join(rebuilt)
                                       src = src[:start + m_alloc.start()] + replacement + src[start + m_alloc.end():]
                                       patched_ns = True
-                                      print(">>> Auto-fixed fs/namespace.c (vfs_create_mount) thành công!", flush=True)
+                                      print(f">>> Auto-fixed fs/namespace.c (vfs_create_mount, arg={arg}) thành công!", flush=True)
                           if not patched_ns:
                               remaining.append(h)
 
