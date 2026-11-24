@@ -473,10 +473,26 @@ jobs:
               if "linux/susfs.h" in src and "linux/susfs_def.h" in src:
                   return src
               inc = "\n#ifdef CONFIG_KSU_SUSFS\n#include <linux/susfs.h>\n#include <linux/susfs_def.h>\n#endif\n"
-              matches = list(re.finditer(r'^\s*#\s*include\s+[<"][^>"]+[>"].*$', src, flags=re.M))
-              if matches:
-                  pos = matches[-1].end()
-                  return src[:pos] + inc + src[pos:]
+              depth = 0
+              last_top_include_end = None
+              first_include_start = None
+              pos = 0
+              for line in src.splitlines(keepends=True):
+                  stripped = line.strip()
+                  if re.match(r'^#\s*(?:if|ifdef|ifndef)\b', stripped):
+                      depth += 1
+                  elif re.match(r'^#\s*endif\b', stripped):
+                      depth = max(0, depth - 1)
+                  elif re.match(r'^#\s*include\s+[<"][^>"]+[>"]', stripped):
+                      if first_include_start is None:
+                          first_include_start = pos
+                      if depth == 0:
+                          last_top_include_end = pos + len(line)
+                  pos += len(line)
+              if last_top_include_end is not None:
+                  return src[:last_top_include_end] + inc + src[last_top_include_end:]
+              if first_include_start is not None:
+                  return src[:first_include_start] + inc + src[first_include_start:]
               return inc + src
 
           def integrate_susfs_into_ksun(test_dir):
