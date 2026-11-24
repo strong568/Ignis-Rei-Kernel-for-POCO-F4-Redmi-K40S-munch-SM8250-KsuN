@@ -62,7 +62,7 @@ jobs:
       - name: Install Build Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y bc bison build-essential curl flex git jq libssl-dev libelf-dev libncurses-dev zip gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
+          sudo apt-get install -y bc bison build-essential curl flex git jq patch libssl-dev libelf-dev libncurses-dev zip gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
 
       - name: Download Clang Toolchain
         run: |
@@ -73,25 +73,19 @@ jobs:
 
       - name: Set Kernel Version String (4.19.325-perf+)
         run: |
-          # 1. Xóa EXTRAVERSION (-REI) trong Makefile gốc
           sed -i 's/^EXTRAVERSION =.*/EXTRAVERSION =/' Makefile
-
-          # 2. Xóa các file localversion* (-cip136, -st20) ở thư mục gốc
           rm -f localversion*
 
-          # 3. Đổi CONFIG_LOCALVERSION="-REI" trong kona-perf_defconfig và các file config khác thành "-perf"
           sed -i 's/^CONFIG_LOCALVERSION=.*/CONFIG_LOCALVERSION="-perf"/' arch/arm64/configs/vendor/kona-perf_defconfig
           find arch/arm64/configs -type f -exec sed -i 's/^CONFIG_LOCALVERSION=.*/CONFIG_LOCALVERSION="-perf"/' {} +
           find arch/arm64/configs -type f -exec sed -i 's/^CONFIG_LOCALVERSION_AUTO=y/# CONFIG_LOCALVERSION_AUTO is not set/' {} +
 
-          # 4. Chốt CONFIG_LOCALVERSION="-perf" ở cuối munch.config để ưu tiên cao nhất khi merge_config
           MUNCH_CFG="arch/arm64/configs/vendor/xiaomi/munch.config"
           if [ -f "$MUNCH_CFG" ]; then
             sed -i '/^CONFIG_LOCALVERSION=/d' "$MUNCH_CFG"
             echo 'CONFIG_LOCALVERSION="-perf"' >> "$MUNCH_CFG"
           fi
 
-          # 5. Chuẩn hóa biến LOCALVERSION trong build.sh để tránh nối trùng hậu tố (-PERF)
           sed -i -E 's/(--set-str[[:space:]]+LOCALVERSION[[:space:]]+)("[^"]*"|'\''[^'\'']*'\''|[^[:space:]]+)/\1"-perf"/g' build.sh
           sed -i -E 's/\bLOCALVERSION=("[^"]*"|'\''[^'\'']*'\''|[^[:space:]]+)/LOCALVERSION=""/g' build.sh
 
@@ -128,7 +122,6 @@ jobs:
           # CONFIG_KSU_SUSFS is not set
           EOF
 
-            # Vô hiệu hóa tạm thời kiểm tra HAVE_KSU_HOOK và auto-sed trong Kbuild khi CONFIG_KSU=n
             if [ -f "$KSU_KBUILD" ]; then
               echo 'obj-$(CONFIG_KSU) += kernelsu.o' > "$KSU_KBUILD"
             fi
@@ -186,16 +179,48 @@ jobs:
           fi
 
           # ==========================================
-          # 3. BUILD KSU-NEXT SUSFS (Manual Hook)
+          # 3. BUILD KSU-NEXT SUSFS (Tự động vá nếu chưa có)
           # ==========================================
           if [ "$BUILD_TYPE" = "ksun-susfs" ] || [ "$BUILD_TYPE" = "all" ]; then
             echo "=========================================="
-            echo ">>> [3/3] Đang build KernelSU-Next (SuSFS)..."
+            echo ">>> [3/3] Đang chuẩn bị & build KernelSU-Next (SuSFS)..."
             echo "=========================================="
 
             if ! grep -rq "config KSU_SUSFS" drivers/kernelsu/ KernelSU-Next/ KernelSU/ fs/ 2>/dev/null; then
-              echo "::error::Nhánh '${{ steps.meta.outputs.raw_branch }}' chưa tích hợp mã nguồn SuSFS (không tìm thấy 'config KSU_SUSFS' trong Kconfig). Hãy áp patch susfs4ksu vào kernel và KernelSU-Next trước khi build ksun-susfs!"
-              exit 1
+              echo ">>> Nhánh chưa có SuSFS, đang tải susfs4ksu (kernel-4.19) và áp patch..."
+              rm -rf /tmp/susfs4ksu /tmp/wild_patches
+              git clone --depth=1 -b kernel-4.19 https://gitlab.com/simonpunk/susfs4ksu.git /tmp/susfs4ksu
+
+              # Chép mã nguồn lõi SuSFS vào kernel
+              cp -rf /tmp/susfs4ksu/kernel_patches/fs/* fs/
+              cp -rf /tmp/susfs4ksu/kernel_patches/include/linux/* include/linux/
+
+              # Áp patch SuSFS cho kernel 4.19
+              if ! patch -p1 --forward --batch < /tmp/susfs4ksu/kernel_patches/50_add_susfs_in_kernel-4.19.patch; then
+                echo "::error::Patch 50_add_susfs_in_kernel-4.19.patch bị conflict với code Ignis-Rei! Danh sách file lỗi (.rej):"
+                find . -name "*.rej" -exec head -n 40 {} +
+                exit 1
+              fi
+
+              # Xác định thư mục thực tế của KernelSU-Next (xử lý cả symlink drivers/kernelsu)
+              KSU_DIR=$(dirname "$(readlink -f drivers/kernelsu/Kconfig)")
+              echo ">>> Thư mục KernelSU-Next: ${KSU_DIR}"
+
+              # Áp patch SuSFS cho KernelSU-Next
+              git clone --depth=1 https://github.com/WildKernels/kernel_patches.git /tmp/wild_patches || true
+              KSUN_PATCH=$(find /tmp/wild_patches /tmp/susfs4ksu -type f \( -name "*susfs*next*.patch" -o -name "10_enable_susfs_for_ksu.patch" \) | head -n 1)
+
+              if [ -n "$KSUN_PATCH" ]; then
+                echo ">>> Áp patch KSU: ${KSUN_PATCH}"
+                if ! patch -d "$KSU_DIR" -p1 --forward --batch < "$KSUN_PATCH"; then
+                  echo "::error::Patch KernelSU-Next SuSFS bị conflict! Danh sách file lỗi (.rej):"
+                  find "$KSU_DIR" -name "*.rej" -exec head -n 40 {} +
+                  exit 1
+                fi
+              else
+                echo "::error::Không tìm thấy file patch SuSFS tương thích KernelSU-Next!"
+                exit 1
+              fi
             fi
 
             cp "${MUNCH_CFG}.bak" "$MUNCH_CFG"
