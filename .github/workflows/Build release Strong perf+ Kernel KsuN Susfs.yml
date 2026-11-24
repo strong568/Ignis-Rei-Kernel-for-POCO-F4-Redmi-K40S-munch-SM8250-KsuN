@@ -84,7 +84,7 @@ jobs:
                       shutil.copy2(os.path.join(dirpath, fn), os.path.join(out_dir, fn))
 
           def autofix_kernel_rejects(work_dir):
-              # 1) Auto-fix fs/namespace.c (backport fs_context: vfs_kern_mount -> vfs_create_mount)
+              # 1) Auto-fix fs/namespace.c (vfs_create_mount & clone_mnt)
               ns_c = os.path.join(work_dir, "fs/namespace.c")
               ns_rej = ns_c + ".rej"
               if os.path.exists(ns_rej) and os.path.exists(ns_c):
@@ -96,6 +96,7 @@ jobs:
                   header = hunks[0]
                   remaining = []
                   for h in hunks[1:]:
+                      # 1a) vfs_kern_mount -> vfs_create_mount (do kernel backport fs_context)
                       if "vfs_kern_mount" in h and "susfs_is_current_ksu_domain" in h and "alloc_vfsmnt(" in h:
                           patched_ns = False
                           m_fn = re.search(r'struct\s+vfsmount\s*\*vfs_create_mount\s*\(\s*struct\s+fs_context\s*\*fc\s*\)\s*\{', src)
@@ -123,8 +124,57 @@ jobs:
                                   print(">>> Auto-fixed fs/namespace.c (vfs_create_mount -> alloc_vfsmnt) thành công!")
                           if not patched_ns:
                               remaining.append(h)
+
+                      # 1b) clone_mnt
+                      elif "clone_mnt" in h and "susfs_is_current_zygote_domain" in h and "old->mnt_devname" in h:
+                          patched_clone = False
+                          m_fn = re.search(r'static\s+struct\s+mount\s*\*clone_mnt\s*\([^)]*\)\s*\{', src, flags=re.S)
+                          if m_fn:
+                              start = m_fn.end()
+                              sub = src[start:start + 2500]
+                              m_alloc = re.search(r'^([ \t]*)mnt\s*=\s*alloc_vfsmnt\(\s*old->mnt_devname\s*\);', sub, flags=re.M)
+                              if m_alloc and "susfs_is_current_zygote_domain" not in sub[:m_alloc.end() + 200]:
+                                  ind = m_alloc.group(1)
+                                  replacement = (
+                                      f"#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT\n"
+                                      f"{ind}{{\n"
+                                      f"{ind}\tbool is_current_ksu_domain = susfs_is_current_ksu_domain();\n"
+                                      f"{ind}\tbool is_current_zygote_domain = susfs_is_current_zygote_domain();\n"
+                                      f"\n"
+                                      f"{ind}\tif (unlikely(is_current_ksu_domain)) {{\n"
+                                      f"{ind}\t\tif (!(flag & CL_COPY_MNT_NS)) {{\n"
+                                      f"{ind}\t\t\tmnt = alloc_vfsmnt(old->mnt_devname, true, 0);\n"
+                                      f"{ind}\t\t\tgoto bypass_orig_flow;\n"
+                                      f"{ind}\t\t}}\n"
+                                      f"{ind}\t\tmnt = alloc_vfsmnt(old->mnt_devname, true, old->mnt_id);\n"
+                                      f"{ind}\t\tif (mnt) {{\n"
+                                      f"{ind}\t\t\tmnt->mnt.susfs_mnt_id_backup = DEFAULT_SUS_MNT_ID_FOR_KSU_PROC_UNSHARE;\n"
+                                      f"{ind}\t\t}}\n"
+                                      f"{ind}\t\tgoto bypass_orig_flow;\n"
+                                      f"{ind}\t}}\n"
+                                      f"{ind}\tif (likely(is_current_zygote_domain) && (old->mnt_id >= DEFAULT_SUS_MNT_ID)) {{\n"
+                                      f"{ind}\t\tmnt = alloc_vfsmnt(old->mnt_devname, true, 0);\n"
+                                      f"{ind}\t\tgoto bypass_orig_flow;\n"
+                                      f"{ind}\t}}\n"
+                                      f"{ind}\tif ((flag & CL_COPY_MNT_NS) && (old->mnt_id >= DEFAULT_SUS_MNT_ID)) {{\n"
+                                      f"{ind}\t\tmnt = alloc_vfsmnt(old->mnt_devname, true, 0);\n"
+                                      f"{ind}\t\tgoto bypass_orig_flow;\n"
+                                      f"{ind}\t}}\n"
+                                      f"{ind}\tmnt = alloc_vfsmnt(old->mnt_devname, false, 0);\n"
+                                      f"bypass_orig_flow:;\n"
+                                      f"{ind}}}\n"
+                                      f"#else\n"
+                                      f"{ind}mnt = alloc_vfsmnt(old->mnt_devname);\n"
+                                      f"#endif"
+                                  )
+                                  src = src[:start + m_alloc.start()] + replacement + src[start + m_alloc.end():]
+                                  patched_clone = True
+                                  print(">>> Auto-fixed fs/namespace.c (clone_mnt -> alloc_vfsmnt) thành công!")
+                          if not patched_clone:
+                              remaining.append(h)
                       else:
                           remaining.append(h)
+
                   with open(ns_c, "w") as f:
                       f.write(src)
                   if not remaining:
@@ -194,12 +244,14 @@ jobs:
                       with open(mmu_rej, "w") as f:
                           f.write(header + "".join(remaining))
 
-          def dump_rejects(title, base_dir, rej_list):
+          def dump_rejects(title, base_dir, rej_list, extra_info=""):
               lines = [f"=== {title} ({len(rej_list)} file .rej) ==="]
+              if extra_info:
+                  lines.append(extra_info)
               for rf in sorted(rej_list):
                   rel = os.path.relpath(rf, base_dir)
                   with open(rf, "r") as f:
-                      cnt = f.read().count("@@ ")
+                      cnt = len(re.findall(r'^@@ ', f.read(), flags=re.M))
                   lines.append(f"  - {rel} ({cnt} hunk)")
               lines.append("")
               for rf in sorted(rej_list):
@@ -277,6 +329,10 @@ jobs:
                           candidates.append(os.path.join(dp, fn))
           candidates.sort(key=lambda p: (0 if "next" in os.path.basename(p).lower() else 1, p))
 
+          print(">>> Danh sách patch KSU/SuSFS tìm thấy:")
+          for c in candidates:
+              print("   *", c)
+
           if not candidates:
               print("::error::Không tìm thấy file patch SuSFS cho KernelSU-Next!")
               sys.exit(1)
@@ -299,7 +355,8 @@ jobs:
               for fn in fns if fn.endswith(".rej")
           ]
           if ksu_rejs:
-              dump_rejects(f"Patch {os.path.basename(ksun_patch)} bị conflict với KernelSU-Next v3.4.2", target_ksu_root, ksu_rejs)
+              extra = "Available KSU patches:\n" + "\n".join("  " + c for c in candidates)
+              dump_rejects(f"Patch {os.path.basename(ksun_patch)} bị conflict với KernelSU-Next v3.4.2", target_ksu_root, ksu_rejs, extra)
 
           print(">>> Áp patch SuSFS cho KernelSU-Next thành công (0 .rej)!")
           PYEOF
