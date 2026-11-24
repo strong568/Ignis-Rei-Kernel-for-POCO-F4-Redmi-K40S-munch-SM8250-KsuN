@@ -475,7 +475,6 @@ jobs:
               susfs_c_txt = open(patched_susfs_c, "r", errors="replace").read() if os.path.isfile(patched_susfs_c) else ""
               kpatch_txt = open(kernel_patch, "r", errors="replace").read()
 
-              # Thu thập mọi CONFIG_KSU_SUSFS_* dùng trong susfs.c & kernel patch để khai báo đầy đủ trong Kconfig
               referenced_cfgs = set(re.findall(r'\bCONFIG_(KSU_SUSFS_[A-Z0-9_]+)\b', susfs_c_txt + "\n" + kpatch_txt))
 
               # 1) Kconfig
@@ -690,117 +689,132 @@ jobs:
                       with open(init_c_path, "w") as f:
                           f.write(init_c)
 
-              # 6) supercall/dispatch.c
-              disp_c_path = os.path.join(test_dir, "supercall", "dispatch.c")
-              if os.path.isfile(disp_c_path):
-                  with open(disp_c_path, "r") as f:
-                      disp_c = f.read()
-                  if "SUSFS_MAGIC" not in disp_c:
-                      disp_c = disp_c.replace(
-                          '#include "supercall/supercall.h"',
-                          '#include "supercall/supercall.h"\n#ifdef CONFIG_KSU_SUSFS\n#include <linux/susfs.h>\n#include <linux/susfs_def.h>\n#endif',
-                          1
+              # 6) supercall/supercall.c & supercall/dispatch.c (tìm đúng file chứa ksu_handle_sys_reboot)
+              cmd_cases = [
+                  ("CMD_SUSFS_ADD_SUS_PATH", "susfs_add_sus_path", "susfs_add_sus_path(arg);"),
+                  ("CMD_SUSFS_ADD_SUS_PATH_LOOP", "susfs_add_sus_path_loop", "susfs_add_sus_path_loop(arg);"),
+                  ("CMD_SUSFS_HIDE_SUS_MNTS_FOR_NON_SU_PROCS", "susfs_set_hide_sus_mnts_for_non_su_procs", "susfs_set_hide_sus_mnts_for_non_su_procs(arg);"),
+                  ("CMD_SUSFS_ADD_SUS_KSTAT", "susfs_add_sus_kstat", "susfs_add_sus_kstat(arg);"),
+                  ("CMD_SUSFS_UPDATE_SUS_KSTAT", "susfs_update_sus_kstat", "susfs_update_sus_kstat(arg);"),
+                  ("CMD_SUSFS_ADD_SUS_KSTAT_STATICALLY", "susfs_add_sus_kstat", "susfs_add_sus_kstat(arg);"),
+                  ("CMD_SUSFS_SET_UNAME", "susfs_set_uname", "susfs_set_uname(arg);"),
+                  ("CMD_SUSFS_ENABLE_LOG", "susfs_enable_log", "susfs_enable_log(arg);"),
+                  ("CMD_SUSFS_SET_CMDLINE_OR_BOOTCONFIG", "susfs_set_cmdline_or_bootconfig", "susfs_set_cmdline_or_bootconfig(arg);"),
+                  ("CMD_SUSFS_ADD_OPEN_REDIRECT", "susfs_add_open_redirect", "susfs_add_open_redirect(arg);"),
+                  ("CMD_SUSFS_ADD_SUS_MAP", "susfs_add_sus_map", "susfs_add_sus_map(arg);"),
+                  ("CMD_SUSFS_ENABLE_AVC_LOG_SPOOFING", "susfs_set_avc_log_spoofing", "susfs_set_avc_log_spoofing(arg);"),
+                  ("CMD_SUSFS_SHOW_ENABLED_FEATURES", "susfs_get_enabled_features", "susfs_get_enabled_features(arg);"),
+                  ("CMD_SUSFS_SHOW_VARIANT", "susfs_show_variant", "susfs_show_variant(arg);"),
+                  ("CMD_SUSFS_SHOW_VERSION", "susfs_show_version", "susfs_show_version(arg);"),
+              ]
+              switch_body = []
+              for macro_name, fn_name, call_stmt in cmd_cases:
+                  if macro_name in susfs_def_txt and fn_name in susfs_h_txt:
+                      switch_body.append(
+                          f"\t\tcase {macro_name}:\n"
+                          f"\t\t\t{call_stmt}\n"
+                          f"\t\t\treturn 0;"
                       )
-                      if "susfs_start_sdcard_monitor_fn" in susfs_h_txt:
-                          disp_c = disp_c.replace(
+
+              susfs_reboot_block = (
+                  "#ifdef CONFIG_KSU_SUSFS\n"
+                  "\tif (magic2 == SUSFS_MAGIC && current_uid().val == 0) {\n"
+                  "\t\tswitch (cmd) {\n"
+                  + "\n".join(switch_body) + "\n"
+                  "\t\tdefault:\n"
+                  "\t\t\treturn -EINVAL;\n"
+                  "\t\t}\n"
+                  "\t}\n"
+                  "#endif\n"
+              )
+
+              for dp, _, fns in os.walk(test_dir):
+                  for fn in fns:
+                      if not fn.endswith(".c"):
+                          continue
+                      fpath = os.path.join(dp, fn)
+                      with open(fpath, "r") as f:
+                          ftxt = f.read()
+                      orig_ftxt = ftxt
+
+                      if "SUSFS_MAGIC" not in ftxt and "ksu_handle_sys_reboot" in ftxt:
+                          ftxt = re.sub(
+                              r'(#include\s+"supercall/supercall\.h")',
+                              r'\1\n#ifdef CONFIG_KSU_SUSFS\n#include <linux/susfs.h>\n#include <linux/susfs_def.h>\n#endif',
+                              ftxt,
+                              count=1
+                          )
+                          if "linux/susfs.h" not in ftxt:
+                              ftxt = "#ifdef CONFIG_KSU_SUSFS\n#include <linux/susfs.h>\n#include <linux/susfs_def.h>\n#endif\n" + ftxt
+
+                          if "if (magic2 == KSU_INSTALL_MAGIC2)" in ftxt:
+                              ftxt = ftxt.replace(
+                                  "if (magic2 == KSU_INSTALL_MAGIC2)",
+                                  susfs_reboot_block + "\n\tif (magic2 == KSU_INSTALL_MAGIC2)",
+                                  1
+                              )
+                          elif "return ksu_handle_toolkit_reboot(" in ftxt:
+                              ftxt = ftxt.replace(
+                                  "return ksu_handle_toolkit_reboot(",
+                                  susfs_reboot_block + "\n\treturn ksu_handle_toolkit_reboot(",
+                                  1
+                              )
+                          else:
+                              m_rb = re.search(r'int\s+ksu_handle_sys_reboot\s*\([^)]*\)\s*\{', ftxt)
+                              if m_rb:
+                                  sub = ftxt[m_rb.end():]
+                                  m_m1 = re.search(r'(if\s*\(\s*magic1\s*!=\s*KSU_INSTALL_MAGIC1\s*\)\s*\{[^}]*\})', sub)
+                                  if m_m1:
+                                      ins_pos = m_rb.end() + m_m1.end()
+                                      ftxt = ftxt[:ins_pos] + "\n\n\t" + susfs_reboot_block.rstrip() + ftxt[ins_pos:]
+
+                      if "on_boot_completed();" in ftxt and "susfs_start_sdcard_monitor_fn" not in ftxt and "susfs_start_sdcard_monitor_fn" in susfs_h_txt:
+                          if "linux/susfs.h" not in ftxt:
+                              ftxt = "#ifdef CONFIG_KSU_SUSFS\n#include <linux/susfs.h>\n#endif\n" + ftxt
+                          ftxt = ftxt.replace(
                               "on_boot_completed();",
                               "on_boot_completed();\n#ifdef CONFIG_KSU_SUSFS\n\t\t\tsusfs_start_sdcard_monitor_fn();\n#endif",
                               1
                           )
 
-                      disp_c = disp_c.replace(
-                          "ksu_mark_running_process();",
-                          "#ifndef CONFIG_KSU_SUSFS\n\t\tksu_mark_running_process();\n#endif",
-                          1
-                      )
-
-                      disp_c = disp_c.replace(
-                          "ret = ksu_get_task_mark(cmd.pid);",
-                          "#ifdef CONFIG_KSU_SUSFS\n\t\tret = susfs_is_current_proc_umounted() ? 0 : 1;\n#else\n\t\tret = ksu_get_task_mark(cmd.pid);\n#endif",
-                          1
-                      )
-
-                      cmd_cases = [
-                          ("CMD_SUSFS_ADD_SUS_PATH", "susfs_add_sus_path", "susfs_add_sus_path(arg);"),
-                          ("CMD_SUSFS_ADD_SUS_PATH_LOOP", "susfs_add_sus_path_loop", "susfs_add_sus_path_loop(arg);"),
-                          ("CMD_SUSFS_HIDE_SUS_MNTS_FOR_NON_SU_PROCS", "susfs_set_hide_sus_mnts_for_non_su_procs", "susfs_set_hide_sus_mnts_for_non_su_procs(arg);"),
-                          ("CMD_SUSFS_ADD_SUS_KSTAT", "susfs_add_sus_kstat", "susfs_add_sus_kstat(arg);"),
-                          ("CMD_SUSFS_UPDATE_SUS_KSTAT", "susfs_update_sus_kstat", "susfs_update_sus_kstat(arg);"),
-                          ("CMD_SUSFS_ADD_SUS_KSTAT_STATICALLY", "susfs_add_sus_kstat", "susfs_add_sus_kstat(arg);"),
-                          ("CMD_SUSFS_SET_UNAME", "susfs_set_uname", "susfs_set_uname(arg);"),
-                          ("CMD_SUSFS_ENABLE_LOG", "susfs_enable_log", "susfs_enable_log(arg);"),
-                          ("CMD_SUSFS_SET_CMDLINE_OR_BOOTCONFIG", "susfs_set_cmdline_or_bootconfig", "susfs_set_cmdline_or_bootconfig(arg);"),
-                          ("CMD_SUSFS_ADD_OPEN_REDIRECT", "susfs_add_open_redirect", "susfs_add_open_redirect(arg);"),
-                          ("CMD_SUSFS_ADD_SUS_MAP", "susfs_add_sus_map", "susfs_add_sus_map(arg);"),
-                          ("CMD_SUSFS_ENABLE_AVC_LOG_SPOOFING", "susfs_set_avc_log_spoofing", "susfs_set_avc_log_spoofing(arg);"),
-                          ("CMD_SUSFS_SHOW_ENABLED_FEATURES", "susfs_get_enabled_features", "susfs_get_enabled_features(arg);"),
-                          ("CMD_SUSFS_SHOW_VARIANT", "susfs_show_variant", "susfs_show_variant(arg);"),
-                          ("CMD_SUSFS_SHOW_VERSION", "susfs_show_version", "susfs_show_version(arg);"),
-                      ]
-                      switch_body = []
-                      for macro_name, fn_name, call_stmt in cmd_cases:
-                          if macro_name in susfs_def_txt and fn_name in susfs_h_txt:
-                              switch_body.append(
-                                  f"\t\tcase {macro_name}:\n"
-                                  f"\t\t\t{call_stmt}\n"
-                                  f"\t\t\treturn 0;"
-                              )
-
-                      susfs_reboot_block = (
-                          "#ifdef CONFIG_KSU_SUSFS\n"
-                          "\tif (magic2 == SUSFS_MAGIC && current_uid().val == 0) {\n"
-                          "\t\tswitch (cmd) {\n"
-                          + "\n".join(switch_body) + "\n"
-                          "\t\tdefault:\n"
-                          "\t\t\treturn -EINVAL;\n"
-                          "\t\t}\n"
-                          "\t}\n"
-                          "#endif\n\n\t"
-                      )
-                      if "return ksu_handle_toolkit_reboot(" in disp_c:
-                          disp_c = disp_c.replace(
-                              "return ksu_handle_toolkit_reboot(",
-                              susfs_reboot_block + "return ksu_handle_toolkit_reboot(",
+                      if "ksu_mark_running_process();" in ftxt and "CONFIG_KSU_SUSFS" not in ftxt:
+                          ftxt = ftxt.replace(
+                              "ksu_mark_running_process();",
+                              "#ifndef CONFIG_KSU_SUSFS\n\t\tksu_mark_running_process();\n#endif",
                               1
                           )
-                      else:
-                          m_rb = re.search(r'int\s+ksu_handle_sys_reboot\s*\([^)]*\)\s*\{', disp_c)
-                          if m_rb:
-                              sub = disp_c[m_rb.end():]
-                              m_ret = re.search(r'(\n[ \t]*return\s+[^;]+;\s*\n\})', sub)
-                              if m_ret:
-                                  disp_c = (
-                                      disp_c[:m_rb.end() + m_ret.start()]
-                                      + "\n\t" + susfs_reboot_block.rstrip()
-                                      + disp_c[m_rb.end() + m_ret.start():]
-                                  )
-                      with open(disp_c_path, "w") as f:
-                          f.write(disp_c)
 
-              # 7) hook/setuid_hook.c
-              setuid_c_path = os.path.join(test_dir, "hook", "setuid_hook.c")
-              if os.path.isfile(setuid_c_path):
-                  with open(setuid_c_path, "r") as f:
-                      setuid_c = f.read()
-                  if "susfs_set_current_proc_umounted" not in setuid_c:
-                      setuid_c = setuid_c.replace(
-                          '#include "feature/kernel_umount.h"',
-                          '#include "feature/kernel_umount.h"\n#ifdef CONFIG_KSU_SUSFS\n#include <linux/susfs.h>\n#include <linux/susfs_def.h>\n#endif',
+                      if "ret = ksu_get_task_mark(cmd.pid);" in ftxt and "susfs_is_current_proc_umounted" not in ftxt:
+                          if "linux/susfs_def.h" not in ftxt:
+                              ftxt = "#ifdef CONFIG_KSU_SUSFS\n#include <linux/susfs_def.h>\n#endif\n" + ftxt
+                          ftxt = ftxt.replace(
+                              "ret = ksu_get_task_mark(cmd.pid);",
+                              "#ifdef CONFIG_KSU_SUSFS\n\t\tret = susfs_is_current_proc_umounted() ? 0 : 1;\n#else\n\t\tret = ksu_get_task_mark(cmd.pid);\n#endif",
+                              1
+                          )
+
+                      if ftxt != orig_ftxt:
+                          with open(fpath, "w") as f:
+                              f.write(ftxt)
+                          print(f">>> Đã cập nhật SuSFS hook trong {os.path.relpath(fpath, test_dir)}", flush=True)
+
+              # 7) feature/kernel_umount.c (đánh dấu proc umounted ngay tại luồng umount chuẩn của KSUN)
+              umount_c_path = os.path.join(test_dir, "feature", "kernel_umount.c")
+              if os.path.isfile(umount_c_path):
+                  with open(umount_c_path, "r") as f:
+                      umount_c = f.read()
+                  if "susfs_set_current_proc_umounted" not in umount_c:
+                      umount_c = (
+                          "#ifdef CONFIG_KSU_SUSFS\n#include <linux/susfs_def.h>\n#endif\n"
+                          + umount_c
+                      )
+                      umount_c = umount_c.replace(
+                          "// umount the target mnt",
+                          "#ifdef CONFIG_KSU_SUSFS\n\tsusfs_set_current_proc_umounted();\n#endif\n\t// umount the target mnt",
                           1
                       )
-                      setuid_c = setuid_c.replace(
-                          "ksu_handle_umount(old_uid, new_uid);",
-                          "ksu_handle_umount(old_uid, new_uid);\n\n"
-                          "#ifdef CONFIG_KSU_SUSFS\n"
-                          "\tif (is_zygote(current_cred()) &&\n"
-                          "\t    (is_isolated_process(new_uid) || (is_appuid(new_uid) && ksu_uid_should_umount(new_uid)))) {\n"
-                          "\t\tsusfs_set_current_proc_umounted();\n"
-                          "\t}\n"
-                          "#endif",
-                          1
-                      )
-                      with open(setuid_c_path, "w") as f:
-                          f.write(setuid_c)
+                      with open(umount_c_path, "w") as f:
+                          f.write(umount_c)
 
               # 8) feature/sucompat.c
               sucompat_c_path = os.path.join(test_dir, "feature", "sucompat.c")
@@ -816,6 +830,8 @@ jobs:
                       for fn_sig in (
                           r'(int\s+ksu_handle_faccessat\s*\([^)]*\)\s*\{)',
                           r'(int\s+ksu_handle_stat\s*\([^)]*\)\s*\{)',
+                          r'(long\s+ksu_handle_execve_sucompat\s*\([^)]*\)\s*\{)',
+                          r'(int\s+ksu_handle_execveat_sucompat\s*\([^)]*\)\s*\{)',
                       ):
                           sucompat_c = re.sub(
                               fn_sig,
