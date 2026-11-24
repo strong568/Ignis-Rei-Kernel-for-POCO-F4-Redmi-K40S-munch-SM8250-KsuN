@@ -68,6 +68,7 @@ jobs:
           susfs_419_repo = sys.argv[2]
           wild_repo = sys.argv[3]
           mode = sys.argv[4]  # "preflight" hoặc "apply"
+          extra_repos = sys.argv[5:]
           report_path = "/tmp/susfs_preflight_report.txt"
 
           def dump_rejects(title, base_dir, rej_list, extra_info=""):
@@ -321,52 +322,64 @@ jobs:
 
           print(">>> Áp patch SuSFS v2.4.0 cho kernel 4.19 thành công (0 .rej)!", flush=True)
 
-          # 2. Áp patch SuSFS v2.4.0 cho KernelSU-Next (tự động tìm file patch khớp 0 .rej)
+          # 2. Áp patch SuSFS v2.4.0 cho KernelSU-Next
           ksu_kconfig = os.path.realpath(os.path.join(root, "drivers/kernelsu/Kconfig"))
           ksu_dir = os.path.dirname(ksu_kconfig)
           ksu_root = os.path.dirname(ksu_dir) if os.path.basename(ksu_dir) == "kernel" else ksu_dir
 
-          tier1_419 = []       # Patch KSU/KSUN nằm trong repo backport 4.19 (JackA1ltman)
-          tier2_wild = []      # Patch active trong WildKernels/wild/
-          tier3_arch_240 = []  # Patch trong WildKernels/archived/ đúng SuSFS v2.4.0 (f7ae19ef / 2.4.0)
-          tier4_arch_other = []
+          # In thông tin phiên bản KernelSU-Next hiện có trong repo
+          for mf in ("Makefile", "Kbuild"):
+              mp = os.path.join(ksu_dir, mf)
+              if os.path.isfile(mp):
+                  with open(mp, "r") as f:
+                      for line in f:
+                          if "KSU_VERSION" in line or "VERSION" in line:
+                              print(f">>> {mf}: {line.strip()}", flush=True)
 
-          for dp, _, fns in os.walk(susfs_419_repo):
-              for fn in fns:
-                  low = fn.lower()
-                  full = os.path.join(dp, fn)
-                  if full == kernel_patch or not low.endswith(".patch"):
-                      continue
-                  if "ksu" in low or "susfs" in low:
-                      tier1_419.append(full)
+          # Chỉ lấy các file .patch THỰC SỰ dành cho KSU (chứa config KSU_SUSFS và KHÔNG chứa fs/namespace.c)
+          def is_ksu_susfs_patch(path):
+              try:
+                  with open(path, "r", errors="replace") as f:
+                      txt = f.read()
+                  if "fs/namespace.c" in txt or "fs/namei.c" in txt:
+                      return False
+                  return "config KSU_SUSFS" in txt
+              except Exception:
+                  return False
 
-          for dp, _, fns in os.walk(wild_repo):
-              is_arch = "archived" in dp.lower()
-              for fn in fns:
-                  low = fn.lower()
-                  if not (low.endswith(".patch") and "ksun" in low and "susfs" in low):
-                      continue
-                  full = os.path.join(dp, fn)
-                  if not is_arch:
-                      tier2_wild.append(full)
-                  elif "f7ae19ef" in low or "2.4.0" in low or "2.4" in low:
-                      tier3_arch_240.append(full)
-                  else:
-                      tier4_arch_other.append(full)
+          search_repos = [susfs_419_repo, wild_repo] + list(extra_repos)
+          all_ksu_patches = []
+          for repo_dir in search_repos:
+              if not os.path.isdir(repo_dir):
+                  continue
+              for dp, _, fns in os.walk(repo_dir):
+                  for fn in fns:
+                      if fn.lower().endswith(".patch"):
+                          full = os.path.join(dp, fn)
+                          if is_ksu_susfs_patch(full):
+                              all_ksu_patches.append(full)
 
-          candidates = (
-              sorted(tier1_419)
-              + sorted(tier2_wild, reverse=True)
-              + sorted(tier3_arch_240, reverse=True)
-              + sorted(tier4_arch_other, reverse=True)
-          )
+          # Xếp ưu tiên: KSUN + SuSFS v2.4.0 (f7ae19ef / 2.4) -> KSUN active -> KSUN archived -> KSU khác
+          def patch_priority(p):
+              low = p.lower()
+              is_ksun = "ksun" in low or "next" in low
+              is_240 = ("f7ae19ef" in low) or ("2.4.0" in low) or ("2.4" in low)
+              is_arch = "archived" in low
+              return (
+                  0 if is_ksun else 1,
+                  0 if is_240 else 1,
+                  0 if not is_arch else 1,
+                  low
+              )
 
-          print(f">>> Tìm thấy {len(candidates)} patch ứng viên cho KernelSU-Next:", flush=True)
+          candidates = sorted(set(all_ksu_patches), key=patch_priority)
+
+          print(f">>> Tìm thấy {len(candidates)} patch KSU/KSUN SuSFS hợp lệ:", flush=True)
           for c in candidates:
               print("   *", c, flush=True)
 
           if not candidates:
-              print("::error::Không tìm thấy patch KSUN SuSFS nào trong các repo đã tải!", flush=True)
+              print("::error::Không tìm thấy patch KSU/KSUN SuSFS hợp lệ nào trong các repo đã tải!", flush=True)
               sys.exit(1)
 
           def try_apply_ksun_patch(src_ksu_root, patch_file):
@@ -422,14 +435,15 @@ jobs:
                   break
 
           if not chosen_patch:
-              results_summary.sort(key=lambda x: (x[1], x[0]))
-              best_rej_cnt, _, best_cand, best_troot, best_rejs, best_log, _ = results_summary[0]
-              extra_lines = ["Kết quả thử các patch ứng viên (ít conflict nhất xếp trước):"]
-              for rcnt, no_kcfg, cpath, _, _, _, _ in results_summary[:10]:
+              # Ưu tiên báo cáo reject của patch v2.4.0 (idx 0 trong candidates) nếu có .rej
+              best_cand = candidates[0]
+              best_troot, best_rejs, _, best_log, _ = try_apply_ksun_patch(ksu_root, best_cand)
+              extra_lines = ["Kết quả thử các patch KSU/KSUN SuSFS:"]
+              for rcnt, no_kcfg, cpath, _, _, _, _ in results_summary:
                   extra_lines.append(f"  - {os.path.basename(cpath)}: {rcnt} .rej (Kconfig_ok={not no_kcfg})")
               if best_rejs:
                   dump_rejects(
-                      f"Không có patch KSUN SuSFS nào áp sạch 0 .rej (tốt nhất: {os.path.basename(best_cand)} còn {best_rej_cnt} .rej)",
+                      f"Patch {os.path.basename(best_cand)} bị conflict với KernelSU-Next ({len(best_rejs)} file .rej)",
                       best_troot, best_rejs, "\n".join(extra_lines)
                   )
               else:
@@ -450,11 +464,12 @@ jobs:
           if grep -rq "config KSU_SUSFS" drivers/kernelsu/ KernelSU-Next/ KernelSU/ fs/ 2>/dev/null; then
             echo ">>> Nhánh đã tích hợp sẵn SuSFS, bỏ qua bước tải patch."
           else
-            echo ">>> Tải backport SuSFS v2.4.0 (4.19) & WildKernels KSUN patch..."
-            rm -rf /tmp/susfs_419 /tmp/wild_patches
+            echo ">>> Tải backport SuSFS v2.4.0 (4.19) & các repo patch KSUN..."
+            rm -rf /tmp/susfs_419 /tmp/wild_patches /tmp/susfs4ksu
             git clone --depth=1 https://github.com/JackA1ltman/NonGKI_Kernel_Build_2nd.git /tmp/susfs_419
             git clone --depth=1 https://github.com/WildKernels/kernel_patches.git /tmp/wild_patches
-            python3 /tmp/apply_susfs.py "$GITHUB_WORKSPACE" /tmp/susfs_419 /tmp/wild_patches preflight
+            git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git /tmp/susfs4ksu || true
+            python3 /tmp/apply_susfs.py "$GITHUB_WORKSPACE" /tmp/susfs_419 /tmp/wild_patches preflight /tmp/susfs4ksu
           fi
 
       - name: Upload SuSFS Rejects Report (on Pre-flight Failure)
@@ -614,7 +629,7 @@ jobs:
             echo "=========================================="
 
             if ! grep -rq "config KSU_SUSFS" drivers/kernelsu/ KernelSU-Next/ KernelSU/ fs/ 2>/dev/null; then
-              python3 /tmp/apply_susfs.py "$GITHUB_WORKSPACE" /tmp/susfs_419 /tmp/wild_patches apply
+              python3 /tmp/apply_susfs.py "$GITHUB_WORKSPACE" /tmp/susfs_419 /tmp/wild_patches apply /tmp/susfs4ksu
             fi
 
             cp "${MUNCH_CFG}.bak" "$MUNCH_CFG"
