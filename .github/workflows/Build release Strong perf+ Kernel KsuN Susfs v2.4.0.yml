@@ -277,6 +277,42 @@ jobs:
                       with open(mmu_rej, "w") as f:
                           f.write(header + "".join(remaining))
 
+              # 4) Auto-fix #include <linux/susfs.h> & <linux/susfs_def.h> trong fs/stat.c
+              stat_c = os.path.join(work_dir, "fs/stat.c")
+              stat_rej = stat_c + ".rej"
+              if os.path.exists(stat_c):
+                  with open(stat_c, "r") as f:
+                      src = f.read()
+                  if "susfs_is_current_app_uid" in src or "STATX_SUS_KSTAT" in src:
+                      inc_block = ""
+                      if "susfs_def.h" not in src:
+                          inc_block += "\n#include <linux/susfs_def.h>"
+                      if "susfs.h" not in src:
+                          inc_block += "\n#include <linux/susfs.h>"
+                      if inc_block:
+                          for anchor in ("#include <linux/fs.h>", "#include <linux/stat.h>", "#include <linux/mm.h>"):
+                              if anchor in src:
+                                  src = src.replace(
+                                      anchor,
+                                      anchor + "\n#ifdef CONFIG_KSU_SUSFS" + inc_block + "\n#endif",
+                                      1
+                                  )
+                                  with open(stat_c, "w") as f:
+                                      f.write(src)
+                                  print(">>> Auto-fixed #include susfs headers trong fs/stat.c thành công!", flush=True)
+                                  break
+              if os.path.exists(stat_rej):
+                  with open(stat_rej, "r") as f:
+                      rej = f.read()
+                  hunks = re.split(r'(?=^@@ )', rej, flags=re.M)
+                  header = hunks[0]
+                  remaining = [h for h in hunks[1:] if not ("#include" in h and "susfs" in h)]
+                  if not remaining:
+                      os.remove(stat_rej)
+                  else:
+                      with open(stat_rej, "w") as f:
+                          f.write(header + "".join(remaining))
+
           if mode == "preflight":
               work_dir = "/tmp/susfs_preflight"
               shutil.rmtree(work_dir, ignore_errors=True)
