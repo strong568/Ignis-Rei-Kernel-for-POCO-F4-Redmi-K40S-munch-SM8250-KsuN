@@ -1,0 +1,124 @@
+name: Build release Strong perf+ Kernel - Ignis-Rei (munch) _KsuNext
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Nhập tên nhánh (branch) chứa patch / code sửa đổi (vd: main, perf)'
+        required: true
+        default: 'perf'
+        type: string
+      variant:
+        description: 'Kernel Variant to Build'
+        required: true
+        default: 'both'
+        type: choice
+        options:
+          - both
+          - aosp
+          - stock
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build Ignis-Rei for Xiaomi POCO F4 (munch)
+    runs-on: ubuntu-22.04
+
+    env:
+      KBUILD_BUILD_USER: "strong"
+      KBUILD_BUILD_HOST: "GitHub-Actions"
+
+    steps:
+      - name: Checkout Kernel Source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.branch || 'main' }}
+          fetch-depth: 1
+
+      - name: Prepare Build Metadata
+        id: meta
+        run: |
+          RAW_BRANCH="${{ github.event.inputs.branch || 'main' }}"
+          SAFE_BRANCH=$(echo "$RAW_BRANCH" | tr '/:@' '-')
+          BUILD_DATE=$(TZ='Asia/Ho_Chi_Minh' date +'%Y%m%d-%H%M')
+          DISPLAY_DATE=$(TZ='Asia/Ho_Chi_Minh' date +'%d/%m/%Y %H:%M ICT')
+          echo "raw_branch=${RAW_BRANCH}" >> "$GITHUB_OUTPUT"
+          echo "safe_branch=${SAFE_BRANCH}" >> "$GITHUB_OUTPUT"
+          echo "tag=Strong-Ignis-Rei-munch-${SAFE_BRANCH}-${BUILD_DATE}" >> "$GITHUB_OUTPUT"
+          echo "date=${DISPLAY_DATE}" >> "$GITHUB_OUTPUT"
+
+      - name: Install Build Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison build-essential curl flex git jq libssl-dev libelf-dev libncurses-dev zip gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
+
+      - name: Download Clang Toolchain
+        run: |
+          mkdir -p clang
+          curl -LSs "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/tags/android-14.0.0_r1/clang-r487747c.tar.gz" -o clang.tar.gz
+          tar -xzf clang.tar.gz -C clang
+          rm -f clang.tar.gz
+
+      - name: Set Kernel Version String (4.19.325-perf+)
+        run: |
+          sed -i 's/^EXTRAVERSION =.*/EXTRAVERSION =/' Makefile
+          rm -f localversion*
+          find arch/arm64/configs -type f -name "*munch*defconfig" -exec sed -i 's/^CONFIG_LOCALVERSION=.*/CONFIG_LOCALVERSION="-perf"/' {} +
+          sed -i 's/LOCALVERSION="[^"]*"/LOCALVERSION="-perf"/g' build.sh
+          sed -i "s/LOCALVERSION='[^']*'/LOCALVERSION='-perf'/g" build.sh
+          sed -i 's/\bLOCALVERSION=[^[:space:]"'\'']*/LOCALVERSION=-perf/g' build.sh
+
+      - name: Compile and Package Kernel
+        run: |
+          chmod +x build.sh
+          CLANG_PATH="${GITHUB_WORKSPACE}/clang" ./build.sh "${{ github.event.inputs.variant || 'both' }}"
+
+      - name: Download Latest KernelSU-Next Manager APKs
+        id: ksun
+        run: |
+          mkdir -p ksun
+          RELEASE_JSON=$(curl -sL -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/KernelSU-Next/KernelSU-Next/releases/latest")
+
+          KSUN_TAG=$(echo "$RELEASE_JSON" | jq -r '.tag_name // empty')
+          APK_URLS=$(echo "$RELEASE_JSON" | jq -r '.assets[]?.browser_download_url // empty' | grep '\.apk$' || true)
+
+          if [ -n "$APK_URLS" ]; then
+            echo "Downloading KernelSU-Next ${KSUN_TAG}..."
+            for url in $APK_URLS; do
+              (cd ksun && curl -fLO --retry 3 "$url")
+            done
+          else
+            echo "API fallback: downloading KernelSU-Next v3.4.2..."
+            KSUN_TAG="v3.4.2"
+            (cd ksun && curl -fLO --retry 3 "https://github.com/KernelSU-Next/KernelSU-Next/releases/download/v3.4.2/KernelSU_Next_v3.4.2-spoofed_33355-release.apk")
+            (cd ksun && curl -fLO --retry 3 "https://github.com/KernelSU-Next/KernelSU-Next/releases/download/v3.4.2/KernelSU_Next_v3.4.2_33355-release.apk")
+          fi
+
+          echo "version=${KSUN_TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload Flashable AnyKernel3 Zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: Strong-perf-Ignis-Rei-munch-${{ steps.meta.outputs.safe_branch }}-${{ github.event.inputs.variant || 'both' }}
+          path: |
+            out/*.zip
+            ksun/*.apk
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: "Strong perf+ Ignis-Rei Kernel (munch) [${{ steps.meta.outputs.raw_branch }}] - ${{ github.event.inputs.variant || 'both' }} (${{ steps.meta.outputs.date }})"
+          body: |
+            ### Build Info
+            - **Device:** Xiaomi Redmi K40S - POCO F4 (`munch`)
+            - **Branch:** `${{ steps.meta.outputs.raw_branch }}`
+            - **Variant:** `${{ github.event.inputs.variant || 'both' }}`
+            - **Build Date:** ${{ steps.meta.outputs.date }}
+            - **KernelSU-Next Manager:** `${{ steps.ksun.outputs.version }}` (bản thường & bản `-spoofed`)
+          files: |
+            out/*.zip
+            ksun/*.apk
