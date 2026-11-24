@@ -199,7 +199,6 @@ jobs:
                                   if added_code and "alloc_vfsmnt(" in added_code:
                                       if "bypass_orig_flow:" in added_code and "bypass_orig_flow:;" not in added_code:
                                           added_code = added_code.replace("bypass_orig_flow:", "bypass_orig_flow:;")
-                                      # Bọc trong { ... } để không lỗi khai báo biến giữa hàm trên C90/GNU89
                                       lines_blk = added_code.splitlines()
                                       ifdef_line = lines_blk[0] if lines_blk[0].startswith("#ifdef") else "#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT"
                                       body_lines = lines_blk[1:] if lines_blk[0].startswith("#ifdef") else lines_blk
@@ -330,7 +329,7 @@ jobs:
 
           print(">>> Áp patch SuSFS v2.4.0 cho kernel 4.19 thành công (0 .rej)!", flush=True)
 
-          # 2. Áp patch SuSFS v2.4.0 cho KernelSU-Next v3.4.2 (lấy từ WildKernels/kernel_patches/wild/)
+          # 2. Áp patch SuSFS v2.4.0 cho KernelSU-Next (lấy từ WildKernels/kernel_patches/wild/)
           ksu_kconfig = os.path.realpath(os.path.join(root, "drivers/kernelsu/Kconfig"))
           ksu_dir = os.path.dirname(ksu_kconfig)
           ksu_root = os.path.dirname(ksu_dir) if os.path.basename(ksu_dir) == "kernel" else ksu_dir
@@ -369,10 +368,23 @@ jobs:
           with open(ksun_patch, "r") as f:
               kpatch_txt = f.read()
 
-          patch_cwd = target_ksu_root if re.search(r'^\+\+\+ b/kernel/', kpatch_txt, flags=re.M) else target_ksu_dir
+          has_kernel_subdir = os.path.isdir(os.path.join(target_ksu_root, "kernel"))
+          patch_has_kernel_prefix = bool(re.search(r'^\+\+\+ b/kernel/', kpatch_txt, flags=re.M))
+
+          if has_kernel_subdir and patch_has_kernel_prefix:
+              patch_cwd = target_ksu_root
+              strip_opt = "-p1"
+          elif not has_kernel_subdir and patch_has_kernel_prefix:
+              patch_cwd = target_ksu_dir
+              strip_opt = "-p2"
+          else:
+              patch_cwd = target_ksu_dir
+              strip_opt = "-p1"
+
+          print(f">>> Áp patch với cwd={patch_cwd}, option={strip_opt}", flush=True)
           with open(ksun_patch, "rb") as pf:
               subprocess.run(
-                  ["patch", "-p1", "--forward", "--batch", "--fuzz=3"],
+                  ["patch", strip_opt, "--forward", "--batch", "--fuzz=3"],
                   cwd=patch_cwd, stdin=pf, check=False
               )
 
@@ -383,7 +395,7 @@ jobs:
           ]
           if ksu_rejs:
               extra = "Available active KSUN patches:\n" + "\n".join("  " + c for c in candidates)
-              dump_rejects(f"Patch {os.path.basename(ksun_patch)} bị conflict với KernelSU-Next v3.4.2", target_ksu_root, ksu_rejs, extra)
+              dump_rejects(f"Patch {os.path.basename(ksun_patch)} bị conflict với KernelSU-Next", target_ksu_root, ksu_rejs, extra)
 
           # Xác minh thực sự có KSU_SUSFS trong Kconfig của KernelSU-Next (tránh trường hợp patch bị skip âm thầm)
           with open(os.path.join(target_ksu_dir, "Kconfig"), "r") as f:
