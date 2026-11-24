@@ -955,10 +955,11 @@ jobs:
           echo ">>> Toolchain đã sẵn sàng: ${CLANG_VER}"
           echo "clang_version=${CLANG_VER}" >> "$GITHUB_OUTPUT"
 
-      - name: Set Kernel Version String (4.19.325-perf+)
+      - name: Set Kernel Version String (4.19.325-perf)
         run: |
           sed -i 's/^EXTRAVERSION =.*/EXTRAVERSION =/' Makefile
           rm -f localversion*
+          : > .scmversion
 
           sed -i 's/^CONFIG_LOCALVERSION=.*/CONFIG_LOCALVERSION="-perf"/' arch/arm64/configs/vendor/kona-perf_defconfig
           find arch/arm64/configs -type f -exec sed -i 's/^CONFIG_LOCALVERSION=.*/CONFIG_LOCALVERSION="-perf"/' {} +
@@ -967,7 +968,12 @@ jobs:
           MUNCH_CFG="arch/arm64/configs/vendor/xiaomi/munch.config"
           if [ -f "$MUNCH_CFG" ]; then
             sed -i '/^CONFIG_LOCALVERSION=/d' "$MUNCH_CFG"
-            echo 'CONFIG_LOCALVERSION="-perf"' >> "$MUNCH_CFG"
+            sed -i '/^CONFIG_LOCALVERSION_AUTO=/d' "$MUNCH_CFG"
+            sed -i '/^# CONFIG_LOCALVERSION_AUTO/d' "$MUNCH_CFG"
+            cat << 'EOF' >> "$MUNCH_CFG"
+          CONFIG_LOCALVERSION="-perf"
+          # CONFIG_LOCALVERSION_AUTO is not set
+          EOF
           fi
 
           sed -i -E 's/(--set-str[[:space:]]+LOCALVERSION[[:space:]]+)("[^"]*"|'\''[^'\'']*'\''|[^[:space:]]+)/\1"-perf"/g' build.sh
@@ -978,6 +984,7 @@ jobs:
         run: |
           chmod +x build.sh
           mkdir -p release_zips
+          export LOCALVERSION=""
 
           MUNCH_CFG="arch/arm64/configs/vendor/xiaomi/munch.config"
           cp "$MUNCH_CFG" "${MUNCH_CFG}.bak"
@@ -1212,7 +1219,7 @@ jobs:
           body: |
             ### Build Info
             - **Device:** Xiaomi Redmi K40S - POCO F4 (`munch`)
-            - **Kernel Version:** `4.19.325-perf+`
+            - **Kernel Version:** `4.19.325-perf`
             - **Toolchain:** `${{ steps.toolchain.outputs.clang_version }}`
             - **Branch:** `${{ steps.meta.outputs.raw_branch }}`
             - **Variant:** `${{ github.event.inputs.variant || 'both' }}`
