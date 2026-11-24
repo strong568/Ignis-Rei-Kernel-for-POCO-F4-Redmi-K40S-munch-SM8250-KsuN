@@ -34,19 +34,19 @@ jobs:
       - name: Checkout Kernel Source
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.branch || 'main' }}
+          ref: ${{ github.event.inputs.branch || 'perf' }}
           fetch-depth: 1
 
       - name: Prepare Build Metadata
         id: meta
         run: |
-          RAW_BRANCH="${{ github.event.inputs.branch || 'main' }}"
+          RAW_BRANCH="${{ github.event.inputs.branch || 'perf' }}"
           SAFE_BRANCH=$(echo "$RAW_BRANCH" | tr '/:@' '-')
           BUILD_DATE=$(TZ='Asia/Ho_Chi_Minh' date +'%Y%m%d-%H%M')
           DISPLAY_DATE=$(TZ='Asia/Ho_Chi_Minh' date +'%d/%m/%Y %H:%M ICT')
           echo "raw_branch=${RAW_BRANCH}" >> "$GITHUB_OUTPUT"
           echo "safe_branch=${SAFE_BRANCH}" >> "$GITHUB_OUTPUT"
-          echo "tag=Strong-Ignis-Rei-munch-${SAFE_BRANCH}-${BUILD_DATE}" >> "$GITHUB_OUTPUT"
+          echo "tag=Strong-perf-Ignis-Rei-munch-${SAFE_BRANCH}-${BUILD_DATE}" >> "$GITHUB_OUTPUT"
           echo "date=${DISPLAY_DATE}" >> "$GITHUB_OUTPUT"
 
       - name: Install Build Dependencies
@@ -63,12 +63,32 @@ jobs:
 
       - name: Set Kernel Version String (4.19.325-perf+)
         run: |
+          # 1. Xóa EXTRAVERSION (-REI) trong Makefile gốc
           sed -i 's/^EXTRAVERSION =.*/EXTRAVERSION =/' Makefile
+
+          # 2. Xóa các file localversion* (-cip136, -st20) ở thư mục gốc
           rm -f localversion*
-          find arch/arm64/configs -type f -name "*munch*defconfig" -exec sed -i 's/^CONFIG_LOCALVERSION=.*/CONFIG_LOCALVERSION="-perf"/' {} +
-          sed -i 's/LOCALVERSION="[^"]*"/LOCALVERSION="-perf"/g' build.sh
-          sed -i "s/LOCALVERSION='[^']*'/LOCALVERSION='-perf'/g" build.sh
-          sed -i 's/\bLOCALVERSION=[^[:space:]"'\'']*/LOCALVERSION=-perf/g' build.sh
+
+          # 3. Đổi CONFIG_LOCALVERSION="-REI" trong kona-perf_defconfig và các file config khác thành "-perf"
+          sed -i 's/^CONFIG_LOCALVERSION=.*/CONFIG_LOCALVERSION="-perf"/' arch/arm64/configs/vendor/kona-perf_defconfig
+          find arch/arm64/configs -type f -exec sed -i 's/^CONFIG_LOCALVERSION=.*/CONFIG_LOCALVERSION="-perf"/' {} +
+          find arch/arm64/configs -type f -exec sed -i 's/^CONFIG_LOCALVERSION_AUTO=y/# CONFIG_LOCALVERSION_AUTO is not set/' {} +
+
+          # 4. Chốt CONFIG_LOCALVERSION="-perf" ở cuối munch.config để ưu tiên cao nhất khi merge_config
+          MUNCH_CFG="arch/arm64/configs/vendor/xiaomi/munch.config"
+          if [ -f "$MUNCH_CFG" ]; then
+            sed -i '/^CONFIG_LOCALVERSION=/d' "$MUNCH_CFG"
+            echo 'CONFIG_LOCALVERSION="-perf"' >> "$MUNCH_CFG"
+          fi
+
+          # 5. Chuẩn hóa biến LOCALVERSION trong build.sh để tránh nối trùng hậu tố (-PERF)
+          sed -i -E 's/(--set-str[[:space:]]+LOCALVERSION[[:space:]]+)("[^"]*"|'\''[^'\'']*'\''|[^[:space:]]+)/\1"-perf"/g' build.sh
+          sed -i -E 's/\bLOCALVERSION=("[^"]*"|'\''[^'\'']*'\''|[^[:space:]]+)/LOCALVERSION=""/g' build.sh
+
+          # Kiểm tra nhanh cấu hình trong log
+          grep -n "^EXTRAVERSION" Makefile || true
+          ls -la localversion* 2>/dev/null || echo "Đã xóa toàn bộ file localversion*"
+          grep -n "^CONFIG_LOCALVERSION" arch/arm64/configs/vendor/kona-perf_defconfig "$MUNCH_CFG" || true
 
       - name: Compile and Package Kernel
         run: |
@@ -115,6 +135,7 @@ jobs:
           body: |
             ### Build Info
             - **Device:** Xiaomi Redmi K40S - POCO F4 (`munch`)
+            - **Kernel Version:** `4.19.325-perf+`
             - **Branch:** `${{ steps.meta.outputs.raw_branch }}`
             - **Variant:** `${{ github.event.inputs.variant || 'both' }}`
             - **Build Date:** ${{ steps.meta.outputs.date }}
