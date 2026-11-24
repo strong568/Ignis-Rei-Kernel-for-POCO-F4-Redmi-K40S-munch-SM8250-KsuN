@@ -1,0 +1,292 @@
+name: Build release Strong perf+ Kernel - Ignis-Rei (munch) _KsuNext SUSFS
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Nhập tên nhánh (branch) chứa patch / code sửa đổi (vd: main, perf)'
+        required: true
+        default: 'perf'
+        type: string
+      variant:
+        description: 'Kernel Variant to Build'
+        required: true
+        default: 'both'
+        type: choice
+        options:
+          - both
+          - aosp
+          - stock
+      build_type:
+        description: 'Loại Kernel (all = build cả 3: ksun-susfs, ksun-nosusfs, noroot)'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - ksun-susfs
+          - ksun-nosusfs
+          - noroot
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build Ignis-Rei for Xiaomi POCO F4 (munch)
+    runs-on: ubuntu-22.04
+
+    env:
+      KBUILD_BUILD_USER: "strong"
+      KBUILD_BUILD_HOST: "GitHub-Actions"
+
+    steps:
+      - name: Checkout Kernel Source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.branch || 'perf' }}
+          fetch-depth: 1
+
+      - name: Prepare Build Metadata
+        id: meta
+        run: |
+          RAW_BRANCH="${{ github.event.inputs.branch || 'perf' }}"
+          SAFE_BRANCH=$(echo "$RAW_BRANCH" | tr '/:@' '-')
+          BUILD_DATE=$(TZ='Asia/Ho_Chi_Minh' date +'%Y%m%d-%H%M')
+          DISPLAY_DATE=$(TZ='Asia/Ho_Chi_Minh' date +'%d/%m/%Y %H:%M ICT')
+          echo "raw_branch=${RAW_BRANCH}" >> "$GITHUB_OUTPUT"
+          echo "safe_branch=${SAFE_BRANCH}" >> "$GITHUB_OUTPUT"
+          echo "tag=Strong-perf-Ignis-Rei-munch-${SAFE_BRANCH}-${BUILD_DATE}" >> "$GITHUB_OUTPUT"
+          echo "date=${DISPLAY_DATE}" >> "$GITHUB_OUTPUT"
+
+      - name: Install Build Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison build-essential curl flex git jq libssl-dev libelf-dev libncurses-dev zip gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
+
+      - name: Download Clang Toolchain
+        run: |
+          mkdir -p clang
+          curl -LSs "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/tags/android-14.0.0_r1/clang-r487747c.tar.gz" -o clang.tar.gz
+          tar -xzf clang.tar.gz -C clang
+          rm -f clang.tar.gz
+
+      - name: Set Kernel Version String (4.19.325-perf+)
+        run: |
+          # 1. Xóa EXTRAVERSION (-REI) trong Makefile gốc
+          sed -i 's/^EXTRAVERSION =.*/EXTRAVERSION =/' Makefile
+
+          # 2. Xóa các file localversion* (-cip136, -st20) ở thư mục gốc
+          rm -f localversion*
+
+          # 3. Đổi CONFIG_LOCALVERSION="-REI" trong kona-perf_defconfig và các file config khác thành "-perf"
+          sed -i 's/^CONFIG_LOCALVERSION=.*/CONFIG_LOCALVERSION="-perf"/' arch/arm64/configs/vendor/kona-perf_defconfig
+          find arch/arm64/configs -type f -exec sed -i 's/^CONFIG_LOCALVERSION=.*/CONFIG_LOCALVERSION="-perf"/' {} +
+          find arch/arm64/configs -type f -exec sed -i 's/^CONFIG_LOCALVERSION_AUTO=y/# CONFIG_LOCALVERSION_AUTO is not set/' {} +
+
+          # 4. Chốt CONFIG_LOCALVERSION="-perf" ở cuối munch.config để ưu tiên cao nhất khi merge_config
+          MUNCH_CFG="arch/arm64/configs/vendor/xiaomi/munch.config"
+          if [ -f "$MUNCH_CFG" ]; then
+            sed -i '/^CONFIG_LOCALVERSION=/d' "$MUNCH_CFG"
+            echo 'CONFIG_LOCALVERSION="-perf"' >> "$MUNCH_CFG"
+          fi
+
+          # 5. Chuẩn hóa biến LOCALVERSION trong build.sh để tránh nối trùng hậu tố (-PERF)
+          sed -i -E 's/(--set-str[[:space:]]+LOCALVERSION[[:space:]]+)("[^"]*"|'\''[^'\'']*'\''|[^[:space:]]+)/\1"-perf"/g' build.sh
+          sed -i -E 's/\bLOCALVERSION=("[^"]*"|'\''[^'\'']*'\''|[^[:space:]]+)/LOCALVERSION=""/g' build.sh
+
+      - name: Compile and Package Kernel (KSU-Next SuSFS / No-SuSFS / No-Root)
+        run: |
+          chmod +x build.sh
+          mkdir -p release_zips
+
+          MUNCH_CFG="arch/arm64/configs/vendor/xiaomi/munch.config"
+          cp "$MUNCH_CFG" "${MUNCH_CFG}.bak"
+
+          KSU_KBUILD=$(readlink -f drivers/kernelsu/Kbuild 2>/dev/null || true)
+          if [ -f "$KSU_KBUILD" ]; then
+            cp "$KSU_KBUILD" /tmp/Kbuild.bak
+          fi
+
+          VARIANT="${{ github.event.inputs.variant || 'both' }}"
+          BUILD_TYPE="${{ github.event.inputs.build_type || 'all' }}"
+
+          # ==========================================
+          # 1. BUILD NO-ROOT (CONFIG_KSU=n)
+          # ==========================================
+          if [ "$BUILD_TYPE" = "noroot" ] || [ "$BUILD_TYPE" = "all" ]; then
+            echo "=========================================="
+            echo ">>> [1/3] Đang build bản No-Root..."
+            echo "=========================================="
+            cp "${MUNCH_CFG}.bak" "$MUNCH_CFG"
+            sed -i '/^CONFIG_KSU/d' "$MUNCH_CFG"
+            sed -i '/^# CONFIG_KSU/d' "$MUNCH_CFG"
+            cat << 'EOF' >> "$MUNCH_CFG"
+          CONFIG_KSU=n
+          # CONFIG_KSU is not set
+          CONFIG_KSU_SUSFS=n
+          # CONFIG_KSU_SUSFS is not set
+          EOF
+
+            # Vô hiệu hóa tạm thời kiểm tra HAVE_KSU_HOOK và auto-sed trong Kbuild khi CONFIG_KSU=n
+            if [ -f "$KSU_KBUILD" ]; then
+              echo 'obj-$(CONFIG_KSU) += kernelsu.o' > "$KSU_KBUILD"
+            fi
+
+            rm -f out/*.zip
+            CLANG_PATH="${GITHUB_WORKSPACE}/clang" ./build.sh "$VARIANT"
+
+            if [ -f "/tmp/Kbuild.bak" ] && [ -n "$KSU_KBUILD" ]; then
+              cp /tmp/Kbuild.bak "$KSU_KBUILD"
+            fi
+
+            if [ -f "out/.config" ] && grep -q "^CONFIG_KSU=y" out/.config; then
+              echo "::error::CONFIG_KSU=y vẫn đang bật trong out/.config khi build bản No-Root!"
+              exit 1
+            fi
+
+            for f in out/*.zip; do
+              [ -e "$f" ] || continue
+              base=$(basename "$f" .zip)
+              mv "$f" "release_zips/${base}-noroot.zip"
+            done
+          fi
+
+          # ==========================================
+          # 2. BUILD KSU-NEXT NO-SUSFS (Syscall Table Hook)
+          # ==========================================
+          if [ "$BUILD_TYPE" = "ksun-nosusfs" ] || [ "$BUILD_TYPE" = "all" ]; then
+            echo "=========================================="
+            echo ">>> [2/3] Đang build KernelSU-Next (No-SuSFS)..."
+            echo "=========================================="
+            cp "${MUNCH_CFG}.bak" "$MUNCH_CFG"
+            sed -i '/^CONFIG_KSU/d' "$MUNCH_CFG"
+            sed -i '/^# CONFIG_KSU/d' "$MUNCH_CFG"
+            cat << 'EOF' >> "$MUNCH_CFG"
+          CONFIG_KSU=y
+          CONFIG_KSU_MANUAL_HOOK=n
+          CONFIG_KSU_SYSCALL_TABLE_HOOK=y
+          CONFIG_KSU_SUSFS=n
+          # CONFIG_KSU_SUSFS is not set
+          EOF
+
+            rm -f out/*.zip
+            CLANG_PATH="${GITHUB_WORKSPACE}/clang" ./build.sh "$VARIANT"
+
+            if [ -f "out/.config" ] && ! grep -q "^CONFIG_KSU=y" out/.config; then
+              echo "::error::CONFIG_KSU=y không được kích hoạt trong out/.config!"
+              exit 1
+            fi
+
+            for f in out/*.zip; do
+              [ -e "$f" ] || continue
+              base=$(basename "$f" .zip)
+              mv "$f" "release_zips/${base}-ksun-nosusfs.zip"
+            done
+          fi
+
+          # ==========================================
+          # 3. BUILD KSU-NEXT SUSFS (Manual Hook)
+          # ==========================================
+          if [ "$BUILD_TYPE" = "ksun-susfs" ] || [ "$BUILD_TYPE" = "all" ]; then
+            echo "=========================================="
+            echo ">>> [3/3] Đang build KernelSU-Next (SuSFS)..."
+            echo "=========================================="
+
+            if ! grep -rq "config KSU_SUSFS" drivers/kernelsu/ KernelSU-Next/ KernelSU/ fs/ 2>/dev/null; then
+              echo "::error::Nhánh '${{ steps.meta.outputs.raw_branch }}' chưa tích hợp mã nguồn SuSFS (không tìm thấy 'config KSU_SUSFS' trong Kconfig). Hãy áp patch susfs4ksu vào kernel và KernelSU-Next trước khi build ksun-susfs!"
+              exit 1
+            fi
+
+            cp "${MUNCH_CFG}.bak" "$MUNCH_CFG"
+            sed -i '/^CONFIG_KSU/d' "$MUNCH_CFG"
+            sed -i '/^# CONFIG_KSU/d' "$MUNCH_CFG"
+            cat << 'EOF' >> "$MUNCH_CFG"
+          CONFIG_KSU=y
+          CONFIG_KSU_MANUAL_HOOK=y
+          CONFIG_KSU_SYSCALL_TABLE_HOOK=n
+          CONFIG_KSU_KPROBES_HOOK=n
+          CONFIG_KSU_SUSFS=y
+          CONFIG_KSU_SUSFS_SUS_PATH=y
+          CONFIG_KSU_SUSFS_SUS_MOUNT=y
+          CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y
+          CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y
+          CONFIG_KSU_SUSFS_SUS_KSTAT=y
+          CONFIG_KSU_SUSFS_TRY_UMOUNT=y
+          CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y
+          CONFIG_KSU_SUSFS_SPOOF_UNAME=y
+          CONFIG_KSU_SUSFS_ENABLE_LOG=y
+          CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
+          CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
+          CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
+          CONFIG_KSU_SUSFS_SUS_MAP=y
+          EOF
+
+            rm -f out/*.zip
+            CLANG_PATH="${GITHUB_WORKSPACE}/clang" ./build.sh "$VARIANT"
+
+            if [ -f "out/.config" ] && { ! grep -q "^CONFIG_KSU_SUSFS=y" out/.config || ! grep -q "^CONFIG_KSU_MANUAL_HOOK=y" out/.config; }; then
+              echo "::error::CONFIG_KSU_SUSFS=y hoặc CONFIG_KSU_MANUAL_HOOK=y không được kích hoạt trong out/.config sau khi merge config!"
+              exit 1
+            fi
+
+            for f in out/*.zip; do
+              [ -e "$f" ] || continue
+              base=$(basename "$f" .zip)
+              mv "$f" "release_zips/${base}-ksun-susfs.zip"
+            done
+          fi
+
+          mv "${MUNCH_CFG}.bak" "$MUNCH_CFG"
+          rm -f /tmp/Kbuild.bak
+          ls -lh release_zips/
+
+      - name: Download Latest KernelSU-Next Manager APKs
+        id: ksun
+        run: |
+          mkdir -p ksun
+          RELEASE_JSON=$(curl -sL -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/KernelSU-Next/KernelSU-Next/releases/latest")
+
+          KSUN_TAG=$(echo "$RELEASE_JSON" | jq -r '.tag_name // empty')
+          APK_URLS=$(echo "$RELEASE_JSON" | jq -r '.assets[]?.browser_download_url // empty' | grep '\.apk$' || true)
+
+          if [ -n "$APK_URLS" ]; then
+            echo "Downloading KernelSU-Next ${KSUN_TAG}..."
+            for url in $APK_URLS; do
+              (cd ksun && curl -fLO --retry 3 "$url")
+            done
+          else
+            echo "API fallback: downloading KernelSU-Next v3.4.2..."
+            KSUN_TAG="v3.4.2"
+            (cd ksun && curl -fLO --retry 3 "https://github.com/KernelSU-Next/KernelSU-Next/releases/download/v3.4.2/KernelSU_Next_v3.4.2-spoofed_33355-release.apk")
+            (cd ksun && curl -fLO --retry 3 "https://github.com/KernelSU-Next/KernelSU-Next/releases/download/v3.4.2/KernelSU_Next_v3.4.2_33355-release.apk")
+          fi
+
+          echo "version=${KSUN_TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload Flashable AnyKernel3 Zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: Strong-perf-Ignis-Rei-munch-${{ steps.meta.outputs.safe_branch }}-${{ github.event.inputs.variant || 'both' }}-${{ github.event.inputs.build_type || 'all' }}
+          path: |
+            release_zips/*.zip
+            ksun/*.apk
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: "Strong perf+ Ignis-Rei Kernel (munch) [${{ steps.meta.outputs.raw_branch }}] - ${{ github.event.inputs.variant || 'both' }} (${{ steps.meta.outputs.date }})"
+          body: |
+            ### Build Info
+            - **Device:** Xiaomi Redmi K40S - POCO F4 (`munch`)
+            - **Kernel Version:** `4.19.325-perf+`
+            - **Branch:** `${{ steps.meta.outputs.raw_branch }}`
+            - **Variant:** `${{ github.event.inputs.variant || 'both' }}`
+            - **Build Types:** `${{ github.event.inputs.build_type || 'all' }}` (`ksun-susfs`, `ksun-nosusfs`, `noroot`)
+            - **Build Date:** ${{ steps.meta.outputs.date }}
+            - **KernelSU-Next Manager:** `${{ steps.ksun.outputs.version }}` (bản thường & bản `-spoofed`)
+          files: |
+            release_zips/*.zip
+            ksun/*.apk
