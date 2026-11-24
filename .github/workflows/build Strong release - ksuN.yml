@@ -3,6 +3,14 @@ name: Build release Strong Kernel - Ignis-Rei (munch) _KsuNext
 on:
   workflow_dispatch:
     inputs:
+      branch:
+        description: 'Branch to Build'
+        required: true
+        default: 'main'
+        type: choice
+        options:
+          - main
+          - perf
       variant:
         description: 'Kernel Variant to Build'
         required: true
@@ -29,6 +37,7 @@ jobs:
       - name: Checkout Kernel Source
         uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.inputs.branch || 'main' }}
           fetch-depth: 1
 
       - name: Install Build Dependencies
@@ -75,7 +84,7 @@ jobs:
       - name: Upload Flashable AnyKernel3 Zip
         uses: actions/upload-artifact@v4
         with:
-          name: Ignis-Rei-munch-${{ github.event.inputs.variant || 'both' }}
+          name: Strong-Ignis-Rei-munch-${{ github.event.inputs.branch || 'main' }}-${{ github.event.inputs.variant || 'both' }}
           path: |
             out/*.zip
             ksun/*.apk
@@ -85,17 +94,18 @@ jobs:
         run: |
           BUILD_DATE=$(TZ='Asia/Ho_Chi_Minh' date +'%Y%m%d-%H%M')
           DISPLAY_DATE=$(TZ='Asia/Ho_Chi_Minh' date +'%d/%m/%Y %H:%M ICT')
-          echo "tag=Strong-Ignis-Rei-munch-${BUILD_DATE}" >> "$GITHUB_OUTPUT"
+          echo "tag=Strong-Ignis-Rei-munch-${{ github.event.inputs.branch || 'main' }}-${BUILD_DATE}" >> "$GITHUB_OUTPUT"
           echo "date=${DISPLAY_DATE}" >> "$GITHUB_OUTPUT"
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.meta.outputs.tag }}
-          name: "Strong Ignis-Rei Kernel (munch) - ${{ github.event.inputs.variant || 'both' }} (${{ steps.meta.outputs.date }})"
+          name: "Strong Ignis-Rei Kernel (munch) [${{ github.event.inputs.branch || 'main' }}] - ${{ github.event.inputs.variant || 'both' }} (${{ steps.meta.outputs.date }})"
           body: |
             ### Build Info
             - **Device:** Xiaomi Redmi K40S - POCO F4 (`munch`)
+            - **Branch:** `${{ github.event.inputs.branch || 'main' }}`
             - **Variant:** `${{ github.event.inputs.variant || 'both' }}`
             - **Build Date:** ${{ steps.meta.outputs.date }}
             - **KernelSU-Next Manager:** `${{ steps.ksun.outputs.version }}` (bản thường & bản `-spoofed`)
