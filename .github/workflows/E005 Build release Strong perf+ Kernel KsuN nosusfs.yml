@@ -9,14 +9,14 @@ on:
         default: 'perf'
         type: string
       variant:
-        description: 'Kernel Variant to Build'
+        description: 'Kernel Variant to Build (giữ mặc định both để tương thích ROM hiện tại)'
         required: true
-        default: 'aosp'
+        default: 'both'
         type: choice
         options:
-          - aosp
-          - stock
           - both
+          - stock
+          - aosp
 
 permissions:
   contents: write
@@ -92,63 +92,18 @@ jobs:
           echo ">>> Toolchain đã sẵn sàng: ${CLANG_VER}"
           echo "clang_version=${CLANG_VER}" >> "$GITHUB_OUTPUT"
 
-      - name: Set Kernel Version String (4.19.325-perf)
-        run: |
-          # Xóa hậu tố -REI trong Makefile và tạo .scmversion rỗng để chặn dấu '+'
-          sed -i 's/^EXTRAVERSION =.*/EXTRAVERSION =/' Makefile
-          rm -f localversion*
-          : > .scmversion
-
-          sed -i 's/^CONFIG_LOCALVERSION=.*/CONFIG_LOCALVERSION="-perf"/' arch/arm64/configs/vendor/kona-perf_defconfig
-          find arch/arm64/configs -type f -exec sed -i 's/^CONFIG_LOCALVERSION=.*/CONFIG_LOCALVERSION="-perf"/' {} +
-          find arch/arm64/configs -type f -exec sed -i 's/^CONFIG_LOCALVERSION_AUTO=y/# CONFIG_LOCALVERSION_AUTO is not set/' {} +
-
-          MUNCH_CFG="arch/arm64/configs/vendor/xiaomi/munch.config"
-          if [ -f "$MUNCH_CFG" ]; then
-            sed -i '/^CONFIG_LOCALVERSION=/d' "$MUNCH_CFG"
-            echo 'CONFIG_LOCALVERSION="-perf"' >> "$MUNCH_CFG"
-          fi
-
-          sed -i -E 's/(--set-str[[:space:]]+LOCALVERSION[[:space:]]+)("[^"]*"|'\''[^'\'']*'\''|[^[:space:]]+)/\1"-perf"/g' build.sh
-          sed -i -E 's/\bLOCALVERSION=("[^"]*"|'\''[^'\'']*'\''|[^[:space:]]+)/LOCALVERSION=""/g' build.sh
-          sed -i '/KBUILD_BUILD_USER=/d;/KBUILD_BUILD_HOST=/d' build.sh
-
       - name: Compile and Package Kernel (Native Branch KSU-Next No-SuSFS)
         run: |
           chmod +x build.sh
           mkdir -p release_zips
 
-          MUNCH_CFG="arch/arm64/configs/vendor/xiaomi/munch.config"
-          cp "$MUNCH_CFG" "${MUNCH_CFG}.bak"
-
-          # Giữ nguyên cấu hình KSU-Next (Manual Hook) và KALLSYMS gốc của nhánh perf, chỉ tắt /proc/config.gz
-          sed -i '/^CONFIG_IKCONFIG/d;/^# CONFIG_IKCONFIG/d' "$MUNCH_CFG"
-          cat << 'EOF' >> "$MUNCH_CFG"
-          # CONFIG_IKCONFIG is not set
-          # CONFIG_IKCONFIG_PROC is not set
-          EOF
-
-          CLANG_PATH="${GITHUB_WORKSPACE}/clang" ./build.sh "${{ github.event.inputs.variant || 'aosp' }}"
+          # Giữ nguyên 100% Makefile, build.sh và defconfig gốc của nhánh perf để đảm bảo boot sạch
+          CLANG_PATH="${GITHUB_WORKSPACE}/clang" ./build.sh "${{ github.event.inputs.variant || 'both' }}"
 
           for cfg in out/.config out/*/.config; do
             [ -f "$cfg" ] || continue
-            echo ">>> Kiểm tra cờ cấu hình trong ${cfg}:"
-            grep -E "^(CONFIG_LOCALVERSION|CONFIG_KSU|CONFIG_IKCONFIG)" "$cfg" || true
-            if grep -q "^CONFIG_IKCONFIG_PROC=y" "$cfg"; then
-              echo "::error::CONFIG_IKCONFIG_PROC=y vẫn đang bật trong ${cfg}!"
-              exit 1
-            fi
-          done
-
-          for kr in out/include/config/kernel.release out/*/include/config/kernel.release; do
-            if [ -f "$kr" ]; then
-              REL=$(cat "$kr")
-              echo ">>> Kernel Release: ${REL}"
-              if [ "$REL" != "4.19.325-perf" ]; then
-                echo "::error::Sai chuỗi kernel.release: ${REL}"
-                exit 1
-              fi
-            fi
+            echo ">>> Kiểm tra cờ KSU trong ${cfg}:"
+            grep -E "^CONFIG_KSU" "$cfg" || true
           done
 
           for f in out/*.zip; do
@@ -157,7 +112,6 @@ jobs:
             mv "$f" "release_zips/Strong-${base#Strong-}-ksun-nosusfs.zip"
           done
 
-          mv "${MUNCH_CFG}.bak" "$MUNCH_CFG"
           ls -lh release_zips/
 
       - name: Download Latest KernelSU-Next Manager APKs
@@ -186,7 +140,7 @@ jobs:
       - name: Upload Flashable AnyKernel3 Zip
         uses: actions/upload-artifact@v4
         with:
-          name: Strong-perf-Ignis-Rei-munch-${{ steps.meta.outputs.safe_branch }}-${{ github.event.inputs.variant || 'aosp' }}-ksun-nosusfs
+          name: Strong-perf-Ignis-Rei-munch-${{ steps.meta.outputs.safe_branch }}-${{ github.event.inputs.variant || 'both' }}-ksun-nosusfs
           path: |
             release_zips/*.zip
             ksun/*.apk
@@ -195,18 +149,17 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.meta.outputs.tag }}
-          name: "Strong perf+ Ignis-Rei Kernel (munch) [${{ steps.meta.outputs.raw_branch }}] - ${{ github.event.inputs.variant || 'aosp' }} No-SuSFS (${{ steps.meta.outputs.date }})"
+          name: "Strong perf+ Ignis-Rei Kernel (munch) [${{ steps.meta.outputs.raw_branch }}] - ${{ github.event.inputs.variant || 'both' }} No-SuSFS (${{ steps.meta.outputs.date }})"
           body: |
             ### Build Info
             - **Device:** Xiaomi POCO F4 / Redmi K40S (`munch`)
-            - **Kernel Version:** `4.19.325-perf`
-            - **Build String:** `builder@pangu-build-component-vendor-552261-qsrm9-hq18k-9cz7k`
             - **Branch:** `${{ steps.meta.outputs.raw_branch }}`
-            - **Variant:** `${{ github.event.inputs.variant || 'aosp' }}`
-            - **Type:** `ksun-nosusfs` (Native Manual Hook, `/proc/config.gz` disabled)
+            - **Variant:** `${{ github.event.inputs.variant || 'both' }}`
+            - **Type:** `ksun-nosusfs` (Native Branch Manual Hook)
             - **Toolchain:** `${{ steps.toolchain.outputs.clang_version }}`
             - **Build Date:** ${{ steps.meta.outputs.date }}
             - **KernelSU-Next Manager:** `${{ steps.ksun.outputs.version }}`
           files: |
             release_zips/*.zip
             ksun/*.apk
+            
