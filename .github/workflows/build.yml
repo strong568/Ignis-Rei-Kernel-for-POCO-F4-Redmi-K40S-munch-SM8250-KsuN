@@ -1,0 +1,52 @@
+name: Build Kernel - Ignis-Rei (munch)
+
+on:
+  workflow_dispatch:
+    inputs:
+      variant:
+        description: 'Kernel Variant to Build'
+        required: true
+        default: 'both'
+        type: choice
+        options:
+          - both
+          - aosp
+          - stock
+
+jobs:
+  build:
+    name: Build Ignis-Rei for Xiaomi POCO F4 (munch)
+    runs-on: ubuntu-22.04
+
+    env:
+      KBUILD_BUILD_USER: "Painz12"
+      KBUILD_BUILD_HOST: "GitHub-Actions"
+
+    steps:
+      - name: Checkout Kernel Source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Install Build Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison build-essential curl flex git libssl-dev libelf-dev libncurses-dev zip gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
+
+      - name: Download Clang Toolchain
+        run: |
+          mkdir -p clang
+          curl -LSs "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/tags/android-14.0.0_r1/clang-r487747c.tar.gz" -o clang.tar.gz
+          tar -xzf clang.tar.gz -C clang
+          rm -f clang.tar.gz
+
+      - name: Compile and Package Kernel
+        run: |
+          chmod +x build.sh
+          CLANG_PATH="${GITHUB_WORKSPACE}/clang" ./build.sh "${{ github.event.inputs.variant || 'both' }}"
+
+      - name: Upload Flashable AnyKernel3 Zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: Ignis-Rei-munch-${{ github.event.inputs.variant || 'both' }}
+          path: out/*.zip
