@@ -93,42 +93,18 @@ jobs:
           echo ">>> Toolchain đã sẵn sàng: ${CLANG_VER}"
           echo "clang_version=${CLANG_VER}" >> "$GITHUB_OUTPUT"
 
-      - name: Set Kernel Version String (4.19.325-perf)
-        run: |
-          sed -i 's/^EXTRAVERSION =.*/EXTRAVERSION =/' Makefile
-          rm -f localversion*
-          : > .scmversion
-
-          sed -i 's/^CONFIG_LOCALVERSION=.*/CONFIG_LOCALVERSION="-perf"/' arch/arm64/configs/vendor/kona-perf_defconfig
-          find arch/arm64/configs -type f -exec sed -i 's/^CONFIG_LOCALVERSION=.*/CONFIG_LOCALVERSION="-perf"/' {} +
-          find arch/arm64/configs -type f -exec sed -i 's/^CONFIG_LOCALVERSION_AUTO=y/# CONFIG_LOCALVERSION_AUTO is not set/' {} +
-
-          MUNCH_CFG="arch/arm64/configs/vendor/xiaomi/munch.config"
-          if [ -f "$MUNCH_CFG" ]; then
-            sed -i '/^CONFIG_LOCALVERSION=/d' "$MUNCH_CFG"
-            echo 'CONFIG_LOCALVERSION="-perf"' >> "$MUNCH_CFG"
-          fi
-
-          sed -i -E 's/(--set-str[[:space:]]+LOCALVERSION[[:space:]]+)("[^"]*"|'\''[^'\'']*'\''|[^[:space:]]+)/\1"-perf"/g' build.sh
-          sed -i -E 's/\bLOCALVERSION=("[^"]*"|'\''[^'\'']*'\''|[^[:space:]]+)/LOCALVERSION=""/g' build.sh
-          sed -i '/KBUILD_BUILD_USER=/d;/KBUILD_BUILD_HOST=/d' build.sh
-
       - name: Compile and Package Kernel (KSU-Next No-SuSFS)
         run: |
           chmod +x build.sh
           mkdir -p release_zips
 
-          # Không ghi đè CONFIG_KSU* để tránh xung đột với hook gốc trong nhánh
+          # Giữ nguyên cấu hình nhân & hook gốc của nhánh để đảm bảo boot ổn định
           CLANG_PATH="${GITHUB_WORKSPACE}/clang" ./build.sh "${{ github.event.inputs.variant || 'both' }}"
 
           for cfg in out/.config out/*/.config; do
             [ -f "$cfg" ] || continue
-            echo ">>> Kiểm tra cờ trong ${cfg}:"
-            grep -E "^(CONFIG_LOCALVERSION|CONFIG_KSU)" "$cfg" || true
-          done
-
-          for kr in out/include/config/kernel.release out/*/include/config/kernel.release; do
-            [ -f "$kr" ] && echo ">>> Kernel Release: $(cat "$kr")"
+            echo ">>> Kiểm tra cờ KSU trong ${cfg}:"
+            grep -E "^CONFIG_KSU" "$cfg" || true
           done
 
           BUILD_TS="${{ steps.meta.outputs.build_date }}"
@@ -137,13 +113,7 @@ jobs:
             base=$(basename "$f" .zip)
             orig_ts=$(echo "$base" | grep -oE '[0-9]{8}-[0-9]{4}' | tail -n1 || true)
             ts="${orig_ts:-$BUILD_TS}"
-            stripped=$(echo "$base" | sed -E 's/-[0-9]{8}-[0-9]{4}//g')
-            mid=$(echo "$stripped" | sed -E 's/^(Strong-)?Ignis-Rei-munch-Perf-(Universal-)?//; s/^-+//; s/-+$//')
-            if [ -n "$mid" ]; then
-              out_name="Strong-Ignis-Rei-munch-Perf-Universal-${mid}-ksun-nosusfs-${ts}.zip"
-            else
-              out_name="Strong-Ignis-Rei-munch-Perf-Universal-ksun-nosusfs-${ts}.zip"
-            fi
+            out_name="Strong-Ignis-Rei-munch-Perf-Universal-ksun-nosusfs-${ts}.zip"
             mv "$f" "release_zips/${out_name}"
           done
 
@@ -188,11 +158,10 @@ jobs:
           body: |
             ### Build Info
             - **Device:** Xiaomi POCO F4 / Redmi K40S (`munch`)
-            - **Kernel Version:** `4.19.325-perf`
             - **Build String:** `builder@pangu-build-component-vendor-552261-qsrm9-hq18k-9cz7k`
             - **Branch:** `${{ steps.meta.outputs.raw_branch }}`
             - **Variant:** `${{ github.event.inputs.variant || 'both' }}`
-            - **Type:** `ksun-nosusfs` (Native Branch Hook)
+            - **Type:** `ksun-nosusfs` (Native Branch Config)
             - **Toolchain:** `${{ steps.toolchain.outputs.clang_version }}`
             - **Build Date:** ${{ steps.meta.outputs.date }}
             - **KernelSU-Next Manager:** `${{ steps.ksun.outputs.version }}`
