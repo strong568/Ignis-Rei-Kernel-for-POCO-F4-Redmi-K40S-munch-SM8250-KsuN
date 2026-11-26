@@ -92,24 +92,24 @@ jobs:
           echo ">>> Toolchain đã sẵn sàng: ${CLANG_VER}"
           echo "clang_version=${CLANG_VER}" >> "$GITHUB_OUTPUT"
 
-      - name: Set Kernel Version String (4.19.325-perf-g1f9b135a6fcc)
+      - name: Set Kernel Version String (4.19.325-perf)
         run: |
+          # Xóa hậu tố -REI trong Makefile và tạo .scmversion rỗng để chặn dấu '+'
+          sed -i 's/^EXTRAVERSION =.*/EXTRAVERSION =/' Makefile
           rm -f localversion*
+          : > .scmversion
 
-          # Chặn scripts/setlocalversion tự nối dấu '+' khi source có chỉnh sửa
-          sed -i "s/printf '%s' +/true/g; s/printf \"%s\" +/true/g" scripts/setlocalversion
-
-          sed -i 's/^CONFIG_LOCALVERSION=.*/CONFIG_LOCALVERSION="-perf-g1f9b135a6fcc"/' arch/arm64/configs/vendor/kona-perf_defconfig
-          find arch/arm64/configs -type f -exec sed -i 's/^CONFIG_LOCALVERSION=.*/CONFIG_LOCALVERSION="-perf-g1f9b135a6fcc"/' {} +
+          sed -i 's/^CONFIG_LOCALVERSION=.*/CONFIG_LOCALVERSION="-perf"/' arch/arm64/configs/vendor/kona-perf_defconfig
+          find arch/arm64/configs -type f -exec sed -i 's/^CONFIG_LOCALVERSION=.*/CONFIG_LOCALVERSION="-perf"/' {} +
           find arch/arm64/configs -type f -exec sed -i 's/^CONFIG_LOCALVERSION_AUTO=y/# CONFIG_LOCALVERSION_AUTO is not set/' {} +
 
           MUNCH_CFG="arch/arm64/configs/vendor/xiaomi/munch.config"
           if [ -f "$MUNCH_CFG" ]; then
             sed -i '/^CONFIG_LOCALVERSION=/d' "$MUNCH_CFG"
-            echo 'CONFIG_LOCALVERSION="-perf-g1f9b135a6fcc"' >> "$MUNCH_CFG"
+            echo 'CONFIG_LOCALVERSION="-perf"' >> "$MUNCH_CFG"
           fi
 
-          sed -i -E 's/(--set-str[[:space:]]+LOCALVERSION[[:space:]]+)("[^"]*"|'\''[^'\'']*'\''|[^[:space:]]+)/\1"-perf-g1f9b135a6fcc"/g' build.sh
+          sed -i -E 's/(--set-str[[:space:]]+LOCALVERSION[[:space:]]+)("[^"]*"|'\''[^'\'']*'\''|[^[:space:]]+)/\1"-perf"/g' build.sh
           sed -i -E 's/\bLOCALVERSION=("[^"]*"|'\''[^'\'']*'\''|[^[:space:]]+)/LOCALVERSION=""/g' build.sh
           sed -i '/KBUILD_BUILD_USER=/d;/KBUILD_BUILD_HOST=/d' build.sh
 
@@ -121,7 +121,7 @@ jobs:
           MUNCH_CFG="arch/arm64/configs/vendor/xiaomi/munch.config"
           cp "$MUNCH_CFG" "${MUNCH_CFG}.bak"
 
-          # Giữ nguyên cấu hình KSU-Next và KALLSYMS gốc của nhánh perf, chỉ tắt /proc/config.gz
+          # Giữ nguyên cấu hình KSU-Next (Manual Hook) và KALLSYMS gốc của nhánh perf, chỉ tắt /proc/config.gz
           sed -i '/^CONFIG_IKCONFIG/d;/^# CONFIG_IKCONFIG/d' "$MUNCH_CFG"
           cat << 'EOF' >> "$MUNCH_CFG"
           # CONFIG_IKCONFIG is not set
@@ -144,7 +144,7 @@ jobs:
             if [ -f "$kr" ]; then
               REL=$(cat "$kr")
               echo ">>> Kernel Release: ${REL}"
-              if [ "$REL" != "4.19.325-perf-g1f9b135a6fcc" ]; then
+              if [ "$REL" != "4.19.325-perf" ]; then
                 echo "::error::Sai chuỗi kernel.release: ${REL}"
                 exit 1
               fi
@@ -199,11 +199,11 @@ jobs:
           body: |
             ### Build Info
             - **Device:** Xiaomi POCO F4 / Redmi K40S (`munch`)
-            - **Kernel Version:** `4.19.325-perf-g1f9b135a6fcc`
+            - **Kernel Version:** `4.19.325-perf`
             - **Build String:** `builder@pangu-build-component-vendor-552261-qsrm9-hq18k-9cz7k`
             - **Branch:** `${{ steps.meta.outputs.raw_branch }}`
             - **Variant:** `${{ github.event.inputs.variant || 'aosp' }}`
-            - **Type:** `ksun-nosusfs` (Native Branch Hook, `/proc/config.gz` disabled)
+            - **Type:** `ksun-nosusfs` (Native Manual Hook, `/proc/config.gz` disabled)
             - **Toolchain:** `${{ steps.toolchain.outputs.clang_version }}`
             - **Build Date:** ${{ steps.meta.outputs.date }}
             - **KernelSU-Next Manager:** `${{ steps.ksun.outputs.version }}`
