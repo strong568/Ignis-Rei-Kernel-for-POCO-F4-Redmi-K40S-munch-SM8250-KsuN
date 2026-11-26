@@ -1,4 +1,4 @@
-name: Build releases Kernel - Ignis-Rei (munch)
+name: Build releases Kernel - Ignis-Rei (munch) Neutron Clang
 
 on:
   workflow_dispatch:
