@@ -11,12 +11,12 @@ on:
       variant:
         description: 'Kernel Variant to Build'
         required: true
-        default: 'both'
+        default: 'aosp'
         type: choice
         options:
-          - both
           - aosp
           - stock
+          - both
       build_type:
         description: 'Loại Kernel (all = đẩy nosusfs trước rồi mới build tiếp susfs)'
         required: true
@@ -58,230 +58,12 @@ jobs:
           echo "tag=Strong-perf-Ignis-Rei-munch-${SAFE_BRANCH}-${BUILD_DATE}" >> "$GITHUB_OUTPUT"
           echo "date=${DISPLAY_DATE}" >> "$GITHUB_OUTPUT"
 
-      - name: Create KernelSU-Next Manual Hook & SuSFS Helper Scripts
+      - name: Verify Built-in Manual Hooks & Create SuSFS Helper Script
         run: |
-          cat << 'PYEOF' > /tmp/apply_ksun_manual_hook.py
-          import os, re, sys
-
-          root = sys.argv[1]
-          ksu_kconfig = os.path.realpath(os.path.join(root, "drivers/kernelsu/Kconfig"))
-          ksu_dir = os.path.dirname(ksu_kconfig)
-
-          if not os.path.isdir(ksu_dir):
-              print("::error::Không tìm thấy thư mục mã nguồn drivers/kernelsu!", flush=True)
-              sys.exit(1)
-
-          ksu_blob = []
-          for dp, _, fns in os.walk(ksu_dir):
-              for fn in fns:
-                  if fn.endswith((".c", ".h")):
-                      with open(os.path.join(dp, fn), "r", errors="replace") as f:
-                          ksu_blob.append(f.read())
-          blob = "\n".join(ksu_blob)
-
-          m_reboot = re.search(r'\bint\s+ksu_handle_sys_reboot\s*\(([^)]*)\)', blob)
-          reboot_ptr2 = bool(m_reboot and "**" in m_reboot.group(1))
-
-          has_execveat = bool(re.search(r'\bksu_handle_execveat\s*\(', blob))
-          has_execveat_sucompat = bool(re.search(r'\bksu_handle_execveat_sucompat\s*\(', blob))
-          has_execveat_hook_flag = "ksu_execveat_hook" in blob
-          has_faccessat = bool(re.search(r'\bksu_handle_faccessat\s*\(', blob))
-          has_stat = bool(re.search(r'\bksu_handle_stat\s*\(', blob))
-          has_vfs_read = bool(re.search(r'\bksu_handle_vfs_read\s*\(', blob))
-          has_vfs_read_flag = "ksu_vfs_read_hook" in blob
-          has_input = bool(re.search(r'\bksu_handle_input_handle_event\s*\(', blob))
-          has_input_flag = "ksu_input_hook" in blob
-          has_devpts = bool(re.search(r'\bksu_handle_devpts\s*\(', blob))
-          has_setresuid = bool(re.search(r'\bksu_handle_setresuid\s*\(', blob))
-
-          print(
-              f">>> KSUN Hook Signatures: reboot_ptr2={reboot_ptr2}, execveat={has_execveat}, "
-              f"faccessat={has_faccessat}, stat={has_stat}, vfs_read={has_vfs_read}, "
-              f"input={has_input}, devpts={has_devpts}, setresuid={has_setresuid}",
-              flush=True
-          )
-
-          def patch_file(rel_path, symbol_check, fn_regex, decl_block, body_anchor_regex, inject_code, after=True):
-              fpath = os.path.join(root, rel_path)
-              if not os.path.isfile(fpath):
-                  print(f"::warning::Không tìm thấy {rel_path}, bỏ qua.", flush=True)
-                  return False
-              with open(fpath, "r", errors="replace") as f:
-                  src = f.read()
-              if symbol_check in src:
-                  print(f">>> {rel_path}: đã có {symbol_check}.", flush=True)
-                  return True
-
-              m_fn = re.search(fn_regex, src, flags=re.M)
-              if not m_fn:
-                  print(f"::warning::Không khớp chữ ký hàm trong {rel_path}!", flush=True)
-                  return False
-
-              fn_start = m_fn.start()
-              src_before = src[:fn_start] + decl_block + "\n"
-              src_after = src[fn_start:]
-
-              m_anc = re.search(body_anchor_regex, src_after, flags=re.M)
-              if not m_anc:
-                  print(f"::warning::Không tìm thấy điểm neo bên trong hàm của {rel_path}!", flush=True)
-                  return False
-
-              pos = m_anc.end() if after else m_anc.start()
-              src_new = src_before + src_after[:pos] + inject_code + src_after[pos:]
-              with open(fpath, "w") as f:
-                  f.write(src_new)
-              print(f">>> Patched Manual Hook vào {rel_path} thành công!", flush=True)
-              return True
-
-          # 1. kernel/reboot.c -> sys_reboot
-          reboot_arg = "&arg" if reboot_ptr2 else "arg"
-          reboot_param = "void __user **arg" if reboot_ptr2 else "void __user *arg"
-          ok_reboot = patch_file(
-              "kernel/reboot.c",
-              "ksu_handle_sys_reboot",
-              r'^SYSCALL_DEFINE4\s*\(\s*reboot\b[^{]*\{',
-              f"#ifdef CONFIG_KSU_MANUAL_HOOK\nextern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, {reboot_param});\n#endif",
-              r'^SYSCALL_DEFINE4\s*\(\s*reboot\b[^{]*\{',
-              f"\n#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_sys_reboot(magic1, magic2, cmd, {reboot_arg});\n#endif",
-              after=True
-          )
-          if not ok_reboot:
-              print("::error::Bắt buộc phải patch được ksu_handle_sys_reboot vào kernel/reboot.c!", flush=True)
-              sys.exit(1)
-
-          # 2. fs/exec.c -> do_execveat_common
-          if has_execveat or has_execveat_sucompat:
-              decls = ["#ifdef CONFIG_KSU_MANUAL_HOOK"]
-              if has_execveat_hook_flag:
-                  decls.append("extern bool ksu_execveat_hook __read_mostly;")
-              if has_execveat:
-                  decls.append("extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);")
-              if has_execveat_sucompat:
-                  decls.append("extern int ksu_handle_execveat_sucompat(int *fd, struct filename **filename_ptr, void *argv, void *envp, int *flags);")
-              decls.append("#endif")
-
-              if has_execveat and has_execveat_sucompat and has_execveat_hook_flag:
-                  call_exec = (
-                      "\n#ifdef CONFIG_KSU_MANUAL_HOOK\n"
-                      "\tif (!ksu_execveat_hook)\n"
-                      "\t\tksu_handle_execveat_sucompat(&fd, &filename, &argv, &envp, &flags);\n"
-                      "\telse\n"
-                      "\t\tksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);\n"
-                      "#endif"
-                  )
-              elif has_execveat:
-                  call_exec = (
-                      "\n#ifdef CONFIG_KSU_MANUAL_HOOK\n"
-                      "\tksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);\n"
-                      "#endif"
-                  )
-              else:
-                  call_exec = (
-                      "\n#ifdef CONFIG_KSU_MANUAL_HOOK\n"
-                      "\tksu_handle_execveat_sucompat(&fd, &filename, &argv, &envp, &flags);\n"
-                      "#endif"
-                  )
-
-              patch_file(
-                  "fs/exec.c",
-                  "ksu_handle_execveat",
-                  r'^static\s+int\s+do_execveat_common\s*\([^)]*\)\s*\{',
-                  "\n".join(decls),
-                  r'if\s*\(\s*IS_ERR\s*\(\s*filename\s*\)\s*\)\s*\n?\s*return\s+PTR_ERR\s*\(\s*filename\s*\)\s*;',
-                  call_exec,
-                  after=True
-              )
-
-          # 3. fs/open.c -> do_faccessat
-          if has_faccessat:
-              patch_file(
-                  "fs/open.c",
-                  "ksu_handle_faccessat",
-                  r'^(?:long|int)\s+do_faccessat\s*\([^)]*\)\s*\{',
-                  "#ifdef CONFIG_KSU_MANUAL_HOOK\nextern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags);\n#endif",
-                  r'if\s*\(\s*mode\s*&\s*~S_IRWXO\s*\)',
-                  "#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_faccessat(&dfd, &filename, &mode, NULL);\n#endif\n\t",
-                  after=False
-              )
-
-          # 4. fs/stat.c -> vfs_statx
-          if has_stat:
-              patch_file(
-                  "fs/stat.c",
-                  "ksu_handle_stat",
-                  r'^int\s+vfs_statx\s*\([^)]*\)\s*\{',
-                  "#ifdef CONFIG_KSU_MANUAL_HOOK\nextern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\n#endif",
-                  r'unsigned\s+int\s+lookup_flags\s*=[^;]+;',
-                  "\n#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_stat(&dfd, &filename, &flags);\n#endif",
-                  after=True
-              )
-
-          # 5. fs/read_write.c -> vfs_read
-          if has_vfs_read:
-              vr_decl = "#ifdef CONFIG_KSU_MANUAL_HOOK\n"
-              if has_vfs_read_flag:
-                  vr_decl += "extern bool ksu_vfs_read_hook __read_mostly;\n"
-              vr_decl += "extern int ksu_handle_vfs_read(struct file **file_ptr, char __user **buf_ptr, size_t *count_ptr, loff_t **pos);\n#endif"
-              vr_call = (
-                  "#ifdef CONFIG_KSU_MANUAL_HOOK\n\tif (unlikely(ksu_vfs_read_hook))\n\t\tksu_handle_vfs_read(&file, &buf, &count, &pos);\n#endif\n\t"
-                  if has_vfs_read_flag else
-                  "#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_vfs_read(&file, &buf, &count, &pos);\n#endif\n\t"
-              )
-              patch_file(
-                  "fs/read_write.c",
-                  "ksu_handle_vfs_read",
-                  r'^ssize_t\s+vfs_read\s*\([^)]*\)\s*\{',
-                  vr_decl,
-                  r'if\s*\(\s*!\s*\(\s*file->f_mode\s*&\s*FMODE_READ\s*\)\s*\)',
-                  vr_call,
-                  after=False
-              )
-
-          # 6. drivers/input/input.c -> input_event
-          if has_input:
-              in_decl = "#ifdef CONFIG_KSU_MANUAL_HOOK\n"
-              if has_input_flag:
-                  in_decl += "extern bool ksu_input_hook __read_mostly;\n"
-              in_decl += "extern int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *value);\n#endif"
-              in_call = (
-                  "\n#ifdef CONFIG_KSU_MANUAL_HOOK\n\t\tif (unlikely(ksu_input_hook))\n\t\t\tksu_handle_input_handle_event(&type, &code, &value);\n#endif"
-                  if has_input_flag else
-                  "\n#ifdef CONFIG_KSU_MANUAL_HOOK\n\t\tksu_handle_input_handle_event(&type, &code, &value);\n#endif"
-              )
-              patch_file(
-                  "drivers/input/input.c",
-                  "ksu_handle_input_handle_event",
-                  r'^void\s+input_event\s*\([^)]*\)\s*\{',
-                  in_decl,
-                  r'if\s*\(\s*is_event_supported\s*\(\s*type\s*,\s*dev->evbit\s*,\s*EV_MAX\s*\)\s*\)\s*\{',
-                  in_call,
-                  after=True
-              )
-
-          # 7. fs/devpts/inode.c -> devpts_get_priv
-          if has_devpts:
-              patch_file(
-                  "fs/devpts/inode.c",
-                  "ksu_handle_devpts",
-                  r'^void\s*\*\s*devpts_get_priv\s*\([^)]*\)\s*\{',
-                  "#ifdef CONFIG_KSU_MANUAL_HOOK\nextern int ksu_handle_devpts(struct inode *);\n#endif",
-                  r'if\s*\(\s*dentry->d_sb->s_magic\s*!=\s*DEVPTS_SUPER_MAGIC\s*\)\s*\n?\s*return\s+NULL\s*;',
-                  "\n#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_devpts(dentry->d_inode);\n#endif",
-                  after=True
-              )
-
-          # 8. kernel/sys.c -> __sys_setresuid
-          if has_setresuid:
-              patch_file(
-                  "kernel/sys.c",
-                  "ksu_handle_setresuid",
-                  r'^(?:long|int)\s+__sys_setresuid\s*\([^)]*\)\s*\{',
-                  "#ifdef CONFIG_KSU_MANUAL_HOOK\nextern int ksu_handle_setresuid(uid_t ruid, uid_t euid, uid_t suid);\n#endif",
-                  r'kruid\s*=\s*make_kuid\s*\(',
-                  "#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_setresuid(ruid, euid, suid);\n#endif\n\t",
-                  after=False
-              )
-          PYEOF
+          # Kiểm tra 6 Manual Hook gốc đã có sẵn trong source Ignis-Rei (không chèn thêm setresuid vào kernel/sys.c)
+          grep -q "ksu_handle_sys_reboot" kernel/reboot.c || { echo "::error::Thiếu ksu_handle_sys_reboot trong kernel/reboot.c"; exit 1; }
+          grep -q "ksu_handle_execveat" fs/exec.c || { echo "::error::Thiếu ksu_handle_execveat trong fs/exec.c"; exit 1; }
+          echo ">>> Xác nhận source Ignis-Rei đã có sẵn Manual Hook gốc (an toàn boot)."
 
           cat << 'PYEOF' > /tmp/apply_susfs.py
           import os, re, shutil, subprocess, sys
@@ -713,7 +495,6 @@ jobs:
 
               referenced_cfgs = set(re.findall(r'\bCONFIG_(KSU_SUSFS_[A-Z0-9_]+)\b', susfs_c_txt + "\n" + kpatch_txt))
 
-              # 1) Kconfig
               kcfg_path = os.path.join(test_dir, "Kconfig")
               with open(kcfg_path, "r") as f:
                   kcfg = f.read()
@@ -765,7 +546,6 @@ jobs:
                   with open(kcfg_path, "w") as f:
                       f.write(kcfg)
 
-              # 2) Kbuild
               kb_path = os.path.join(test_dir, "Kbuild")
               if os.path.isfile(kb_path):
                   with open(kb_path, "r") as f:
@@ -785,7 +565,6 @@ jobs:
                       with open(kb_path, "w") as f:
                           f.write(kb)
 
-              # 3) selinux/selinux.h & selinux/selinux.c
               sel_h_path = os.path.join(test_dir, "selinux", "selinux.h")
               if os.path.isfile(sel_h_path):
                   with open(sel_h_path, "r") as f:
@@ -913,7 +692,6 @@ jobs:
                       with open(sel_c_path, "w") as f:
                           f.write(sel_c)
 
-              # 4) selinux/rules.c
               rules_c_path = os.path.join(test_dir, "selinux", "rules.c")
               if os.path.isfile(rules_c_path):
                   with open(rules_c_path, "r") as f:
@@ -928,7 +706,6 @@ jobs:
                       with open(rules_c_path, "w") as f:
                           f.write(rules_c)
 
-              # 5) core/init.c
               init_c_path = os.path.join(test_dir, "core", "init.c")
               if os.path.isfile(init_c_path):
                   with open(init_c_path, "r") as f:
@@ -943,7 +720,6 @@ jobs:
                       with open(init_c_path, "w") as f:
                           f.write(init_c)
 
-              # 6) Chèn handler SUSFS_MAGIC vào định nghĩa ksu_handle_sys_reboot(...) trong supercall/
               cmd_cases = [
                   ("CMD_SUSFS_ADD_SUS_PATH", "susfs_add_sus_path"),
                   ("CMD_SUSFS_ADD_SUS_PATH_LOOP", "susfs_add_sus_path_loop"),
@@ -1039,7 +815,6 @@ jobs:
                           with open(fpath, "w") as f:
                               f.write(ftxt)
 
-              # 7) feature/kernel_umount.c
               umount_c_path = os.path.join(test_dir, "feature", "kernel_umount.c")
               if os.path.isfile(umount_c_path):
                   with open(umount_c_path, "r") as f:
@@ -1054,7 +829,6 @@ jobs:
                       with open(umount_c_path, "w") as f:
                           f.write(umount_c)
 
-              # 8) feature/sucompat.c
               sucompat_c_path = os.path.join(test_dir, "feature", "sucompat.c")
               if os.path.isfile(sucompat_c_path):
                   with open(sucompat_c_path, "r") as f:
@@ -1077,7 +851,6 @@ jobs:
                       with open(sucompat_c_path, "w") as f:
                           f.write(sucompat_c)
 
-              # 9) policy/app_profile.c
               app_prof_path = os.path.join(test_dir, "policy", "app_profile.c")
               if os.path.isfile(app_prof_path):
                   with open(app_prof_path, "r") as f:
@@ -1204,13 +977,30 @@ jobs:
           sed -i 's/-Wdeclaration-after-statement/-Wno-declaration-after-statement/g' Makefile
           rm -f localversion*
 
-          # Giả lập chuỗi uname -r và /proc/version giống hệt stock OS1.0.15.0.ULMCNXM
-          sed -i 's/UTS_RELEASE \\"$(KERNELRELEASE)\\"/UTS_RELEASE \\"4.19.157-perf-g1f9b135a6fcc\\"/' Makefile
+          # Loại bỏ dấu '+' khi source có patch
+          cat << 'EOF' > scripts/setlocalversion
+          #!/bin/sh
+          printf "%s" "-perf-g1f9b135a6fcc"
+          EOF
+          chmod +x scripts/setlocalversion
 
-          # Giả lập chuỗi compiler Android NDK clang 10.0.7 của munch stock
-          if [ -f "scripts/mkcompile_h" ]; then
-            sed -i -E 's|^([[:space:]]*echo[[:space:]]+\\#define[[:space:]]+LINUX_COMPILER).*|\1 \\"clang version 10.0.7 for Android NDK, GNU ld (binutils-2.27-bd24d23f) 2.27.0.20170315\\"|' scripts/mkcompile_h
-          fi
+          # Ghi đè trực tiếp chuỗi UTS_RELEASE và LINUX_COMPILER vào linux_banner & init_uts_ns
+          python3 - << 'PYEOF'
+          p = "init/version.c"
+          with open(p, "r") as f:
+              txt = f.read()
+          inc = "#include <generated/compile.h>"
+          override = (
+              inc + "\n"
+              "#undef UTS_RELEASE\n"
+              '#define UTS_RELEASE "4.19.157-perf-g1f9b135a6fcc"\n'
+              "#undef LINUX_COMPILER\n"
+              '#define LINUX_COMPILER "clang version 10.0.7 for Android NDK, GNU ld (binutils-2.27-bd24d23f) 2.27.0.20170315"\n'
+          )
+          assert inc in txt, "Không tìm thấy #include <generated/compile.h> trong init/version.c"
+          with open(p, "w") as f:
+              f.write(txt.replace(inc, override, 1))
+          PYEOF
 
           sed -i 's/^CONFIG_LOCALVERSION=.*/CONFIG_LOCALVERSION="-perf-g1f9b135a6fcc"/' arch/arm64/configs/vendor/kona-perf_defconfig
           find arch/arm64/configs -type f -exec sed -i 's/^CONFIG_LOCALVERSION=.*/CONFIG_LOCALVERSION="-perf-g1f9b135a6fcc"/' {} +
@@ -1238,12 +1028,11 @@ jobs:
           MUNCH_CFG="arch/arm64/configs/vendor/xiaomi/munch.config"
           cp "$MUNCH_CFG" "${MUNCH_CFG}.bak"
 
-          VARIANT="${{ github.event.inputs.variant || 'both' }}"
+          VARIANT="${{ github.event.inputs.variant || 'aosp' }}"
 
           echo "=========================================="
-          echo ">>> [1/2] Đang patch Manual Hook & build KernelSU-Next (No-SuSFS)..."
+          echo ">>> [1/2] Đang build KernelSU-Next (Manual Hook - No-SuSFS) [${VARIANT}]..."
           echo "=========================================="
-          python3 /tmp/apply_ksun_manual_hook.py "$GITHUB_WORKSPACE"
 
           sed -i '/^CONFIG_KSU/d;/^# CONFIG_KSU/d' "$MUNCH_CFG"
           sed -i '/^CONFIG_IKCONFIG/d;/^# CONFIG_IKCONFIG/d;/^CONFIG_KALLSYMS_ALL/d' "$MUNCH_CFG"
@@ -1291,7 +1080,7 @@ jobs:
         if: ${{ (github.event.inputs.build_type || 'all') == 'ksun-nosusfs' || (github.event.inputs.build_type || 'all') == 'all' }}
         uses: actions/upload-artifact@v4
         with:
-          name: Strong-perf-Ignis-Rei-munch-${{ steps.meta.outputs.safe_branch }}-${{ github.event.inputs.variant || 'both' }}-ksun-nosusfs
+          name: Strong-perf-Ignis-Rei-munch-${{ steps.meta.outputs.safe_branch }}-${{ github.event.inputs.variant || 'aosp' }}-ksun-nosusfs
           path: |
             release_zips/*-ksun-nosusfs.zip
             ksun/*.apk
@@ -1301,7 +1090,7 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.meta.outputs.tag }}
-          name: "Strong perf+ Ignis-Rei Kernel (munch) [${{ steps.meta.outputs.raw_branch }}] - ${{ github.event.inputs.variant || 'both' }} (${{ steps.meta.outputs.date }})"
+          name: "Strong perf+ Ignis-Rei Kernel (munch) [${{ steps.meta.outputs.raw_branch }}] - ${{ github.event.inputs.variant || 'aosp' }} (${{ steps.meta.outputs.date }})"
           body: |
             ### Build Info
             - **Device:** Xiaomi Redmi K40S - POCO F4 (`munch`)
@@ -1309,7 +1098,7 @@ jobs:
             - **Hook Mode:** `CONFIG_KSU_MANUAL_HOOK=y` (Clean `sys_call_table`)
             - **Toolchain:** `${{ steps.toolchain.outputs.clang_version }}`
             - **Branch:** `${{ steps.meta.outputs.raw_branch }}`
-            - **Variant:** `${{ github.event.inputs.variant || 'both' }}`
+            - **Variant:** `${{ github.event.inputs.variant || 'aosp' }}`
             - **Build Date:** ${{ steps.meta.outputs.date }}
             - **KernelSU-Next Manager:** `${{ steps.ksun.outputs.version }}` (bản thường & bản `-spoofed`)
             - **Status:** Đã xuất bản bản `ksun-nosusfs` (đang build tiếp `ksun-susfs` nếu chọn `all`).
@@ -1330,10 +1119,10 @@ jobs:
           MUNCH_CFG="arch/arm64/configs/vendor/xiaomi/munch.config"
           cp "$MUNCH_CFG" "${MUNCH_CFG}.bak"
 
-          VARIANT="${{ github.event.inputs.variant || 'both' }}"
+          VARIANT="${{ github.event.inputs.variant || 'aosp' }}"
 
           echo "=========================================="
-          echo ">>> [2/2] Đang chuẩn bị & build KernelSU-Next (Manual Hook + SuSFS)..."
+          echo ">>> [2/2] Đang chuẩn bị & build KernelSU-Next (Manual Hook + SuSFS) [${VARIANT}]..."
           echo "=========================================="
 
           if ! grep -rq "config KSU_SUSFS" drivers/kernelsu/ KernelSU-Next/ KernelSU/ fs/ 2>/dev/null; then
@@ -1343,8 +1132,6 @@ jobs:
             git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git /tmp/susfs4ksu || true
             python3 /tmp/apply_susfs.py "$GITHUB_WORKSPACE" /tmp/susfs_419 /tmp/wild_patches apply /tmp/susfs4ksu
           fi
-
-          python3 /tmp/apply_ksun_manual_hook.py "$GITHUB_WORKSPACE"
 
           VER=""
           for h in include/linux/susfs.h $(find /tmp/susfs_419 /tmp/susfs4ksu -maxdepth 5 -name "susfs.h" 2>/dev/null); do
@@ -1422,7 +1209,7 @@ jobs:
         if: ${{ (github.event.inputs.build_type || 'all') == 'ksun-susfs' || (github.event.inputs.build_type || 'all') == 'all' }}
         uses: actions/upload-artifact@v4
         with:
-          name: Strong-perf-Ignis-Rei-munch-${{ steps.meta.outputs.safe_branch }}-${{ github.event.inputs.variant || 'both' }}-ksun-susfs
+          name: Strong-perf-Ignis-Rei-munch-${{ steps.meta.outputs.safe_branch }}-${{ github.event.inputs.variant || 'aosp' }}-ksun-susfs
           path: |
             release_zips/*-ksun-susfs-*.zip
             ksun/*.apk
@@ -1432,7 +1219,7 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.meta.outputs.tag }}
-          name: "Strong perf+ Ignis-Rei Kernel (munch) [${{ steps.meta.outputs.raw_branch }}] - ${{ github.event.inputs.variant || 'both' }} (${{ steps.meta.outputs.date }})"
+          name: "Strong perf+ Ignis-Rei Kernel (munch) [${{ steps.meta.outputs.raw_branch }}] - ${{ github.event.inputs.variant || 'aosp' }} (${{ steps.meta.outputs.date }})"
           body: |
             ### Build Info
             - **Device:** Xiaomi Redmi K40S - POCO F4 (`munch`)
@@ -1440,7 +1227,7 @@ jobs:
             - **Hook Mode:** `CONFIG_KSU_MANUAL_HOOK=y` (Clean `sys_call_table`)
             - **Toolchain:** `${{ steps.toolchain.outputs.clang_version }}`
             - **Branch:** `${{ steps.meta.outputs.raw_branch }}`
-            - **Variant:** `${{ github.event.inputs.variant || 'both' }}`
+            - **Variant:** `${{ github.event.inputs.variant || 'aosp' }}`
             - **Build Types:** `${{ github.event.inputs.build_type || 'all' }}` (SuSFS `${{ steps.build_susfs.outputs.susfs_version }}`)
             - **Build Date:** ${{ steps.meta.outputs.date }}
             - **KernelSU-Next Manager:** `${{ steps.ksun.outputs.version }}` (bản thường & bản `-spoofed`)
