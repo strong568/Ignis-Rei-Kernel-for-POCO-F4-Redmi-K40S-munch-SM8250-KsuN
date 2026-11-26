@@ -8,15 +8,6 @@ on:
         required: true
         default: 'perf'
         type: string
-      variant:
-        description: 'Kernel Variant to Build (aosp = Custom ROM | stock = MIUI / HyperOS)'
-        required: true
-        default: 'both'
-        type: choice
-        options:
-          - both
-          - aosp
-          - stock
 
 permissions:
   contents: write
@@ -71,26 +62,19 @@ jobs:
       - name: Compile and Package Kernel
         run: |
           chmod +x build.sh
-          CLANG_PATH="${GITHUB_WORKSPACE}/clang" ./build.sh "${{ github.event.inputs.variant || 'both' }}"
+          CLANG_PATH="${GITHUB_WORKSPACE}/clang" ./build.sh aosp
 
-      - name: Package & Rename Kernel Zips
+      - name: Rename Kernel Zip
         run: |
-          VARIANT="${{ github.event.inputs.variant || 'both' }}"
-          orig_zip=$(ls out/Ignis-Rei-*.zip | head -n 1)
-          base=$(basename "$orig_zip")
-
-          if [ "$VARIANT" = "aosp" ]; then
-            mv "$orig_zip" "out/Strong568-${base%.zip}-AOSP.zip"
-          elif [ "$VARIANT" = "stock" ]; then
-            mv "$orig_zip" "out/Strong568-${base%.zip}-Stock.zip"
-          else
-            # build.sh đã compile cả 2 nhưng mặc định chỉ zip bản aosp
-            mv "$orig_zip" "out/Strong568-${base%.zip}-AOSP.zip"
-            if [ -f "out/stock/arch/arm64/boot/Image" ] && [ -d "out/AK3" ]; then
-              cp -f "out/stock/arch/arm64/boot/Image" "out/AK3/MUNCH-Image"
-              (cd out/AK3 && zip -r9 "../Strong568-${base%.zip}-Stock.zip" .)
+          for f in out/Ignis-Rei-*.zip; do
+            [ -e "$f" ] || continue
+            base=$(basename "$f")
+            new_name="${base%.zip}-Universal.zip"
+            if [[ "$new_name" != Strong568-* ]]; then
+              new_name="Strong568-${new_name}"
             fi
-          fi
+            mv "$f" "out/${new_name}"
+          done
           ls -lh out/*.zip
 
       - name: Download Latest KernelSU-Next Manager APKs
@@ -119,7 +103,7 @@ jobs:
       - name: Upload Flashable AnyKernel3 Zip
         uses: actions/upload-artifact@v4
         with:
-          name: Strong568-Ignis-Rei-munch-${{ github.event.inputs.branch || 'perf' }}-${{ github.event.inputs.variant || 'both' }}
+          name: Strong568-Ignis-Rei-munch-${{ github.event.inputs.branch || 'perf' }}-Universal
           path: out/*.zip
 
       - name: Prepare Release Metadata
@@ -141,15 +125,13 @@ jobs:
           name: "Strong568 Ignis-Rei (munch) [${{ steps.meta.outputs.branch }} | KSUN - No SuSFS] - ${{ steps.meta.outputs.date }}"
           body: |
             > **Note:**
-            > - Đây là bản **KernelSU-Next (No SuSFS)**.
-            > - **Stock (`-Stock.zip`):** Dành cho **MIUI / HyperOS**.
-            > - **AOSP (`-AOSP.zip`):** Dành cho các bản Custom ROM.
-            > - **Quan trọng:** Hãy **restore `boot.img` gốc của ROM** trước khi flash nếu máy đã từng cài kernel khác.
+            > - Đây là bản **KernelSU-Next (No SuSFS)** — **Universal** (tự nhận diện **AOSP**, **MIUI / HyperOS**, và **ColorOS / OxygenOS / RealmeUI Port**).
+            > - Hãy **restore `boot.img` gốc của ROM** trước khi flash nếu máy đã từng cài kernel khác.
 
             ### Build Info
             - **Device:** Xiaomi POCO F4 (`munch`)
             - **Branch:** `${{ steps.meta.outputs.branch }}`
-            - **Variant:** `${{ (github.event.inputs.variant || 'both') == 'both' && 'AOSP & Stock [MIUI / HyperOS] (2 separate zips)' || (github.event.inputs.variant == 'stock' && 'Stock (MIUI / HyperOS)' || 'AOSP') }}`
+            - **Variant:** `Universal (AOSP / MIUI / HyperOS / OPlus Port)`
             - **Compiler:** `${{ steps.toolchain.outputs.version }}`
             - **Root:** KernelSU-Next (**No SuSFS**)
             - **KernelSU-Next Manager:** `${{ steps.ksun.outputs.version }}`
