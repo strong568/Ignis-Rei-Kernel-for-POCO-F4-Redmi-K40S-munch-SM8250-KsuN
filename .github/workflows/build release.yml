@@ -1,0 +1,138 @@
+name: Build releases Kernel - Ignis-Rei (munch)
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch to build (perf / main / nhập tay tên nhánh)'
+        required: true
+        default: 'perf'
+        type: string
+      variant:
+        description: 'Kernel Variant to Build (aosp = Custom ROM | stock = MIUI / HyperOS)'
+        required: true
+        default: 'both'
+        type: choice
+        options:
+          - both
+          - aosp
+          - stock
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build Ignis-Rei for Xiaomi POCO F4 (munch)
+    runs-on: ubuntu-22.04
+
+    env:
+      KBUILD_BUILD_USER: "builder"
+      KBUILD_BUILD_HOST: "pangu-build-component-vendor-552261-qsrm9-hq18k-9cz7k"
+
+    steps:
+      - name: Checkout Kernel Source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.branch || 'perf' }}
+          fetch-depth: 1
+
+      - name: Install Build Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison build-essential curl flex git jq libssl-dev libelf-dev libncurses-dev zip gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
+
+      - name: Download Clang Toolchain
+        run: |
+          mkdir -p clang
+          curl -LSs "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/tags/android-14.0.0_r1/clang-r487747c.tar.gz" -o clang.tar.gz
+          tar -xzf clang.tar.gz -C clang
+          rm -f clang.tar.gz
+
+      - name: Compile and Package Kernel
+        run: |
+          chmod +x build.sh
+          CLANG_PATH="${GITHUB_WORKSPACE}/clang" ./build.sh "${{ github.event.inputs.variant || 'both' }}"
+
+      - name: Package & Rename Kernel Zips
+        run: |
+          VARIANT="${{ github.event.inputs.variant || 'both' }}"
+          orig_zip=$(ls out/Ignis-Rei-*.zip | head -n 1)
+          base=$(basename "$orig_zip")
+
+          if [ "$VARIANT" = "aosp" ]; then
+            mv "$orig_zip" "out/Strong568-${base%.zip}-AOSP.zip"
+          elif [ "$VARIANT" = "stock" ]; then
+            mv "$orig_zip" "out/Strong568-${base%.zip}-Stock.zip"
+          else
+            # build.sh đã compile cả 2 nhưng mặc định chỉ zip bản aosp
+            mv "$orig_zip" "out/Strong568-${base%.zip}-AOSP.zip"
+            if [ -f "out/stock/arch/arm64/boot/Image" ] && [ -d "out/AK3" ]; then
+              cp -f "out/stock/arch/arm64/boot/Image" "out/AK3/MUNCH-Image"
+              (cd out/AK3 && zip -r9 "../Strong568-${base%.zip}-Stock.zip" .)
+            fi
+          fi
+          ls -lh out/*.zip
+
+      - name: Download Latest KernelSU-Next Manager APKs
+        id: ksun
+        run: |
+          mkdir -p ksun
+          RELEASE_JSON=$(curl -sL -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/KernelSU-Next/KernelSU-Next/releases/latest")
+
+          KSUN_TAG=$(echo "$RELEASE_JSON" | jq -r '.tag_name // empty')
+          APK_URLS=$(echo "$RELEASE_JSON" | jq -r '.assets[]?.browser_download_url // empty' | grep '\.apk$' || true)
+
+          if [ -n "$APK_URLS" ]; then
+            echo "Downloading KernelSU-Next ${KSUN_TAG}..."
+            for url in $APK_URLS; do
+              (cd ksun && curl -fLO --retry 3 "$url")
+            done
+          else
+            KSUN_TAG="v3.4.2"
+            (cd ksun && curl -fLO --retry 3 "https://github.com/KernelSU-Next/KernelSU-Next/releases/download/v3.4.2/KernelSU_Next_v3.4.2-spoofed_33355-release.apk")
+            (cd ksun && curl -fLO --retry 3 "https://github.com/KernelSU-Next/KernelSU-Next/releases/download/v3.4.2/KernelSU_Next_v3.4.2_33355-release.apk")
+          fi
+
+          echo "version=${KSUN_TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload Flashable AnyKernel3 Zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: Strong568-Ignis-Rei-munch-${{ github.event.inputs.branch || 'perf' }}-${{ github.event.inputs.variant || 'both' }}
+          path: out/*.zip
+
+      - name: Prepare Release Metadata
+        id: meta
+        env:
+          BUILD_BRANCH: ${{ github.event.inputs.branch || 'perf' }}
+        run: |
+          echo "tag=Strong568-$(TZ='Asia/Ho_Chi_Minh' date +'%Y%m%d-%H%M')" >> "$GITHUB_OUTPUT"
+          echo "date=$(TZ='Asia/Ho_Chi_Minh' date +'%Y-%m-%d %H:%M GMT+7')" >> "$GITHUB_OUTPUT"
+          echo "branch=${BUILD_BRANCH}" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          tag_name: ${{ steps.meta.outputs.tag }}
+          target_commitish: ${{ steps.meta.outputs.sha }}
+          name: "Strong568 Ignis-Rei (munch) [${{ steps.meta.outputs.branch }} | KSUN - No SuSFS] - ${{ steps.meta.outputs.date }}"
+          body: |
+            > **Note:**
+            > - Đây là bản **KernelSU-Next (No SuSFS)**.
+            > - **Stock:** Dành cho **MIUI / HyperOS**.
+            > - **AOSP:** Dành cho các bản Custom ROM.
+
+            ### Build Info
+            - **Device:** Xiaomi POCO F4 (`munch`)
+            - **Branch:** `${{ steps.meta.outputs.branch }}`
+            - **Variant:** `${{ (github.event.inputs.variant || 'both') == 'both' && 'AOSP & Stock [MIUI / HyperOS] (2 separate zips)' || (github.event.inputs.variant == 'stock' && 'Stock (MIUI / HyperOS)' || 'AOSP') }}`
+            - **Root:** KernelSU-Next (**No SuSFS**)
+            - **KernelSU-Next Manager:** `${{ steps.ksun.outputs.version }}`
+            - **Build Date:** `${{ steps.meta.outputs.date }}`
+          files: |
+            out/*.zip
+            ksun/*.apk
