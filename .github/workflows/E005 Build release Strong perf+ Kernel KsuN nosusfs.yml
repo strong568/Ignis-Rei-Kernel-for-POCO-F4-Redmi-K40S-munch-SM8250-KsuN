@@ -1,0 +1,212 @@
+name: e005 Build release Strong perf+ Kernel - Ignis-Rei (munch) KsuN No-SuSFS Neutron Clang 24
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Tên nhánh (branch) cần build'
+        required: true
+        default: 'perf'
+        type: string
+      variant:
+        description: 'Kernel Variant to Build'
+        required: true
+        default: 'aosp'
+        type: choice
+        options:
+          - aosp
+          - stock
+          - both
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build Ignis-Rei for Xiaomi POCO F4 (munch)
+    runs-on: ubuntu-22.04
+
+    env:
+      KBUILD_BUILD_USER: "builder"
+      KBUILD_BUILD_HOST: "pangu-build-component-vendor-552261-qsrm9-hq18k-9cz7k"
+
+    steps:
+      - name: Checkout Kernel Source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.branch || 'perf' }}
+          fetch-depth: 1
+
+      - name: Prepare Build Metadata
+        id: meta
+        run: |
+          RAW_BRANCH="${{ github.event.inputs.branch || 'perf' }}"
+          SAFE_BRANCH=$(echo "$RAW_BRANCH" | tr '/:@' '-')
+          BUILD_DATE=$(TZ='Asia/Ho_Chi_Minh' date +'%Y%m%d-%H%M')
+          DISPLAY_DATE=$(TZ='Asia/Ho_Chi_Minh' date +'%d/%m/%Y %H:%M ICT')
+          echo "raw_branch=${RAW_BRANCH}" >> "$GITHUB_OUTPUT"
+          echo "safe_branch=${SAFE_BRANCH}" >> "$GITHUB_OUTPUT"
+          echo "tag=Strong-perf-Ignis-Rei-munch-${SAFE_BRANCH}-${BUILD_DATE}" >> "$GITHUB_OUTPUT"
+          echo "date=${DISPLAY_DATE}" >> "$GITHUB_OUTPUT"
+
+      - name: Install Build Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison build-essential curl flex git jq libarchive-tools patchelf patch python3 libssl-dev libelf-dev libncurses-dev wget zip zstd gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
+
+      - name: Download Neutron Clang 24 Toolchain
+        id: toolchain
+        run: |
+          mkdir -p clang
+          cd clang
+          curl -fLO --retry 3 "https://raw.githubusercontent.com/Neutron-Toolchains/antman/main/antman"
+          chmod +x antman
+
+          CLANG_TAG="06092026"
+          LATEST_TAG=$(curl -sL -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/Neutron-Toolchains/clang-build-catalogue/releases/latest" \
+            | jq -r '.tag_name // empty')
+
+          if [ -n "$LATEST_TAG" ]; then
+            CLANG_TAG="$LATEST_TAG"
+          fi
+
+          echo ">>> Đang tải Neutron Clang 24 (tag: ${CLANG_TAG})..."
+          for i in 1 2 3 4; do
+            if ./antman -S="${CLANG_TAG}" --noconfirm --noprogress; then
+              break
+            fi
+            echo ">>> Thử lại tải Neutron Clang lần ${i}..."
+            sleep 5
+          done
+
+          if [ ! -x "./bin/clang" ]; then
+            echo ">>> Fallback sang Neutron Clang 24 (06092026)..."
+            ./antman -S=06092026 --noconfirm --noprogress
+          fi
+
+          echo ">>> Patching glibc cho Neutron Clang trên Ubuntu 22.04..."
+          ./antman --patch=glibc --noconfirm --noprogress
+
+          CLANG_VER=$(./bin/clang --version | head -n1)
+          echo ">>> Toolchain đã sẵn sàng: ${CLANG_VER}"
+          echo "clang_version=${CLANG_VER}" >> "$GITHUB_OUTPUT"
+
+      - name: Set Kernel Version String (4.19.325-perf-g1f9b135a6fcc)
+        run: |
+          rm -f localversion*
+
+          # Chặn scripts/setlocalversion tự nối dấu '+' khi source có chỉnh sửa
+          sed -i "s/printf '%s' +/true/g; s/printf \"%s\" +/true/g" scripts/setlocalversion
+
+          sed -i 's/^CONFIG_LOCALVERSION=.*/CONFIG_LOCALVERSION="-perf-g1f9b135a6fcc"/' arch/arm64/configs/vendor/kona-perf_defconfig
+          find arch/arm64/configs -type f -exec sed -i 's/^CONFIG_LOCALVERSION=.*/CONFIG_LOCALVERSION="-perf-g1f9b135a6fcc"/' {} +
+          find arch/arm64/configs -type f -exec sed -i 's/^CONFIG_LOCALVERSION_AUTO=y/# CONFIG_LOCALVERSION_AUTO is not set/' {} +
+
+          MUNCH_CFG="arch/arm64/configs/vendor/xiaomi/munch.config"
+          if [ -f "$MUNCH_CFG" ]; then
+            sed -i '/^CONFIG_LOCALVERSION=/d' "$MUNCH_CFG"
+            echo 'CONFIG_LOCALVERSION="-perf-g1f9b135a6fcc"' >> "$MUNCH_CFG"
+          fi
+
+          sed -i -E 's/(--set-str[[:space:]]+LOCALVERSION[[:space:]]+)("[^"]*"|'\''[^'\'']*'\''|[^[:space:]]+)/\1"-perf-g1f9b135a6fcc"/g' build.sh
+          sed -i -E 's/\bLOCALVERSION=("[^"]*"|'\''[^'\'']*'\''|[^[:space:]]+)/LOCALVERSION=""/g' build.sh
+          sed -i '/KBUILD_BUILD_USER=/d;/KBUILD_BUILD_HOST=/d' build.sh
+
+      - name: Compile and Package Kernel (Native Branch KSU-Next No-SuSFS)
+        run: |
+          chmod +x build.sh
+          mkdir -p release_zips
+
+          MUNCH_CFG="arch/arm64/configs/vendor/xiaomi/munch.config"
+          cp "$MUNCH_CFG" "${MUNCH_CFG}.bak"
+
+          # Giữ nguyên cấu hình KSU-Next và KALLSYMS gốc của nhánh perf, chỉ tắt /proc/config.gz
+          sed -i '/^CONFIG_IKCONFIG/d;/^# CONFIG_IKCONFIG/d' "$MUNCH_CFG"
+          cat << 'EOF' >> "$MUNCH_CFG"
+          # CONFIG_IKCONFIG is not set
+          # CONFIG_IKCONFIG_PROC is not set
+          EOF
+
+          CLANG_PATH="${GITHUB_WORKSPACE}/clang" ./build.sh "${{ github.event.inputs.variant || 'aosp' }}"
+
+          for cfg in out/.config out/*/.config; do
+            [ -f "$cfg" ] || continue
+            echo ">>> Kiểm tra cờ cấu hình trong ${cfg}:"
+            grep -E "^(CONFIG_LOCALVERSION|CONFIG_KSU|CONFIG_IKCONFIG)" "$cfg" || true
+            if grep -q "^CONFIG_IKCONFIG_PROC=y" "$cfg"; then
+              echo "::error::CONFIG_IKCONFIG_PROC=y vẫn đang bật trong ${cfg}!"
+              exit 1
+            fi
+          done
+
+          for kr in out/include/config/kernel.release out/*/include/config/kernel.release; do
+            if [ -f "$kr" ]; then
+              REL=$(cat "$kr")
+              echo ">>> Kernel Release: ${REL}"
+              if [ "$REL" != "4.19.325-perf-g1f9b135a6fcc" ]; then
+                echo "::error::Sai chuỗi kernel.release: ${REL}"
+                exit 1
+              fi
+            fi
+          done
+
+          for f in out/*.zip; do
+            [ -e "$f" ] || continue
+            base=$(basename "$f" .zip)
+            mv "$f" "release_zips/Strong-${base#Strong-}-ksun-nosusfs.zip"
+          done
+
+          mv "${MUNCH_CFG}.bak" "$MUNCH_CFG"
+          ls -lh release_zips/
+
+      - name: Download Latest KernelSU-Next Manager APKs
+        id: ksun
+        run: |
+          mkdir -p ksun
+          RELEASE_JSON=$(curl -sL -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/KernelSU-Next/KernelSU-Next/releases/latest")
+
+          KSUN_TAG=$(echo "$RELEASE_JSON" | jq -r '.tag_name // empty')
+          APK_URLS=$(echo "$RELEASE_JSON" | jq -r '.assets[]?.browser_download_url // empty' | grep '\.apk$' || true)
+
+          if [ -n "$APK_URLS" ]; then
+            echo "Downloading KernelSU-Next ${KSUN_TAG}..."
+            for url in $APK_URLS; do
+              (cd ksun && curl -fLO --retry 3 "$url")
+            done
+          else
+            KSUN_TAG="v3.4.2"
+            (cd ksun && curl -fLO --retry 3 "https://github.com/KernelSU-Next/KernelSU-Next/releases/download/v3.4.2/KernelSU_Next_v3.4.2-spoofed_33355-release.apk")
+            (cd ksun && curl -fLO --retry 3 "https://github.com/KernelSU-Next/KernelSU-Next/releases/download/v3.4.2/KernelSU_Next_v3.4.2_33355-release.apk")
+          fi
+
+          echo "version=${KSUN_TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload Flashable AnyKernel3 Zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: Strong-perf-Ignis-Rei-munch-${{ steps.meta.outputs.safe_branch }}-${{ github.event.inputs.variant || 'aosp' }}-ksun-nosusfs
+          path: |
+            release_zips/*.zip
+            ksun/*.apk
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: "Strong perf+ Ignis-Rei Kernel (munch) [${{ steps.meta.outputs.raw_branch }}] - ${{ github.event.inputs.variant || 'aosp' }} No-SuSFS (${{ steps.meta.outputs.date }})"
+          body: |
+            ### Build Info
+            - **Device:** Xiaomi POCO F4 / Redmi K40S (`munch`)
+            - **Kernel Version:** `4.19.325-perf-g1f9b135a6fcc`
+            - **Build String:** `builder@pangu-build-component-vendor-552261-qsrm9-hq18k-9cz7k`
+            - **Branch:** `${{ steps.meta.outputs.raw_branch }}`
+            - **Variant:** `${{ github.event.inputs.variant || 'aosp' }}`
+            - **Type:** `ksun-nosusfs` (Native Branch Hook, `/proc/config.gz` disabled)
+            - **Toolchain:** `${{ steps.toolchain.outputs.clang_version }}`
+            - **Build Date:** ${{ steps.meta.outputs.date }}
+            - **KernelSU-Next Manager:** `${{ steps.ksun.outputs.version }}`
+          files: |
+            release_zips/*.zip
+            ksun/*.apk
