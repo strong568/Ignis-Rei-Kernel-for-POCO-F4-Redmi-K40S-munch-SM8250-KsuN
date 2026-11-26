@@ -118,7 +118,6 @@ jobs:
                   print(f"::warning::Không khớp chữ ký hàm trong {rel_path}!", flush=True)
                   return False
 
-              # Chèn extern declaration ngay trên hàm mục tiêu để tránh lỗi implicit-declaration
               fn_start = m_fn.start()
               src_before = src[:fn_start] + decl_block + "\n"
               src_after = src[fn_start:]
@@ -272,7 +271,7 @@ jobs:
                   after=True
               )
 
-          # 8. kernel/sys.c -> __sys_setresuid (chèn sau phần khai báo biến cục bộ để tránh lỗi -Wdeclaration-after-statement)
+          # 8. kernel/sys.c -> __sys_setresuid
           if has_setresuid:
               patch_file(
                   "kernel/sys.c",
@@ -992,7 +991,7 @@ jobs:
                                           f"\t\t\treturn 0;"
                                       )
 
-                              ptr_check = f"\tif (!{p_arg})\n\t\treturn -EINVAL;\n" if caller_is_ptr2 else ""
+                              ptr_check = f"\t\tif (!{p_arg})\n\t\t\treturn -EINVAL;\n" if caller_is_ptr2 else ""
                               susfs_reboot_block = (
                                   "\n#ifdef CONFIG_KSU_SUSFS\n"
                                   f"\tif ({p_m1} == KSU_INSTALL_MAGIC1 && {p_m2} == SUSFS_MAGIC && current_uid().val == 0) {{\n"
@@ -1229,6 +1228,18 @@ jobs:
           VARIANT="${{ github.event.inputs.variant || 'both' }}"
           BUILD_TYPE="${{ github.event.inputs.build_type || 'all' }}"
 
+          run_kbuild() {
+            set +e
+            CLANG_PATH="${GITHUB_WORKSPACE}/clang" ./build.sh "$VARIANT" 2>&1 | tee /tmp/kbuild.log
+            local rc=${PIPESTATUS[0]}
+            set -e
+            if [ "$rc" -ne 0 ]; then
+              echo "::error::Build kernel thất bại (exit code ${rc}). Chi tiết lỗi compiler:"
+              grep -E "(: error:|fatal error:|undefined reference)" /tmp/kbuild.log | tail -n 40 || true
+              exit "$rc"
+            fi
+          }
+
           verify_config_flag() {
             local mode="$1"
             local flag="$2"
@@ -1296,7 +1307,7 @@ jobs:
           EOF
 
             rm -rf out/aosp out/stock out/*.zip
-            CLANG_PATH="${GITHUB_WORKSPACE}/clang" ./build.sh "$VARIANT"
+            run_kbuild
 
             verify_config_flag must_on CONFIG_KSU
             verify_config_flag must_on CONFIG_KSU_MANUAL_HOOK
@@ -1365,7 +1376,7 @@ jobs:
           EOF
 
             rm -rf out/aosp out/stock out/*.zip
-            CLANG_PATH="${GITHUB_WORKSPACE}/clang" ./build.sh "$VARIANT"
+            run_kbuild
 
             verify_config_flag must_on CONFIG_KSU
             verify_config_flag must_on CONFIG_KSU_MANUAL_HOOK
