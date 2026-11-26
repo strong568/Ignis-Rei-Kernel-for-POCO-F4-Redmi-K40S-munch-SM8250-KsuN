@@ -1,4 +1,4 @@
-name: Build releases Kernel - Ignis-Rei (munch) Neutron Clang
+name: Build releases Kernel - Ignis-Rei (munch)
 
 on:
   workflow_dispatch:
@@ -42,30 +42,27 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y bc bison build-essential curl flex git jq libarchive-tools libssl-dev libelf-dev libncurses-dev patchelf wget zip zstd gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
 
-      - name: Download Latest Neutron Clang Toolchain
+      - name: Download Latest Neutron Clang 24 Toolchain
         id: toolchain
         run: |
           mkdir -p clang
           cd clang
+          curl -fLSs "https://raw.githubusercontent.com/Neutron-Toolchains/antman/main/antman" -o antman
+          chmod +x antman
+
           RELEASE_JSON=$(curl -sL -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             "https://api.github.com/repos/Neutron-Toolchains/clang-build-catalogue/releases/latest")
-
           CLANG_TAG=$(echo "$RELEASE_JSON" | jq -r '.tag_name // empty')
-          CLANG_URL=$(echo "$RELEASE_JSON" | jq -r '.assets[]?.browser_download_url // empty' | grep '\.tar\.zst$' | head -n 1 || true)
 
-          if [ -z "$CLANG_URL" ]; then
-            CLANG_TAG="06092026"
-            CLANG_URL="https://github.com/Neutron-Toolchains/clang-build-catalogue/releases/download/${CLANG_TAG}/neutron-clang-${CLANG_TAG}.tar.zst"
+          if [ -n "$CLANG_TAG" ]; then
+            echo "Syncing Neutron Clang (${CLANG_TAG})..."
+            ./antman -S="$CLANG_TAG"
+          else
+            echo "Syncing latest Neutron Clang..."
+            ./antman -S
           fi
 
-          echo "Downloading Neutron Clang (${CLANG_TAG})..."
-          curl -fL --retry 3 "$CLANG_URL" -o neutron-clang.tar.zst
-          tar --zstd -xf neutron-clang.tar.zst
-          rm -f neutron-clang.tar.zst
-
-          # Tạo build.info và patch glibc để chạy tương thích trên ubuntu-22.04
-          printf "[tag]\n%s\n" "$CLANG_TAG" > build.info
-          bash <(curl -sL "https://raw.githubusercontent.com/Neutron-Toolchains/antman/main/antman") --patch=glibc
+          ./antman --patch=glibc
 
           CLANG_VER=$(./bin/clang --version | head -n 1)
           echo "Installed: ${CLANG_VER}"
@@ -145,8 +142,9 @@ jobs:
           body: |
             > **Note:**
             > - Đây là bản **KernelSU-Next (No SuSFS)**.
-            > - **Stock:** Dành cho **MIUI / HyperOS**.
-            > - **AOSP:** Dành cho các bản Custom ROM.
+            > - **Stock (`-Stock.zip`):** Dành cho **MIUI / HyperOS**.
+            > - **AOSP (`-AOSP.zip`):** Dành cho các bản Custom ROM.
+            > - **Quan trọng:** Hãy **restore `boot.img` gốc của ROM** trước khi flash nếu máy đã từng cài kernel khác.
 
             ### Build Info
             - **Device:** Xiaomi POCO F4 (`munch`)
