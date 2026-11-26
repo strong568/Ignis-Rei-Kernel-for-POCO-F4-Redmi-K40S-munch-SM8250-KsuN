@@ -272,16 +272,16 @@ jobs:
                   after=True
               )
 
-          # 8. kernel/sys.c -> __sys_setresuid (nếu phiên bản KSUN dùng hook này)
+          # 8. kernel/sys.c -> __sys_setresuid (chèn sau phần khai báo biến cục bộ để tránh lỗi -Wdeclaration-after-statement)
           if has_setresuid:
               patch_file(
                   "kernel/sys.c",
                   "ksu_handle_setresuid",
                   r'^(?:long|int)\s+__sys_setresuid\s*\([^)]*\)\s*\{',
                   "#ifdef CONFIG_KSU_MANUAL_HOOK\nextern int ksu_handle_setresuid(uid_t ruid, uid_t euid, uid_t suid);\n#endif",
-                  r'^(?:long|int)\s+__sys_setresuid\s*\([^)]*\)\s*\{',
-                  "\n#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_setresuid(ruid, euid, suid);\n#endif",
-                  after=True
+                  r'kruid\s*=\s*make_kuid\s*\(',
+                  "#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_setresuid(ruid, euid, suid);\n#endif\n\t",
+                  after=False
               )
           PYEOF
 
