@@ -1,4 +1,4 @@
-name: e005 Manual-Hook Build release Strong perf+ Kernel - Ignis-Rei (munch)_KsuNext latest SUSFS - Neutron Clang 24 - spoofed stock OS1.0.15.0.ULMCNXM
+name: e005 Manual-Hook Build release Strong perf+ Kernel - Ignis-Rei (munch)_KsuNext latest SUSFS - Neutron Clang 24
 
 on:
   workflow_dispatch:
@@ -60,7 +60,6 @@ jobs:
 
       - name: Verify Built-in Manual Hooks & Create SuSFS Helper Script
         run: |
-          # Kiểm tra 6 Manual Hook gốc đã có sẵn trong source Ignis-Rei (không chèn thêm setresuid vào kernel/sys.c)
           grep -q "ksu_handle_sys_reboot" kernel/reboot.c || { echo "::error::Thiếu ksu_handle_sys_reboot trong kernel/reboot.c"; exit 1; }
           grep -q "ksu_handle_execveat" fs/exec.c || { echo "::error::Thiếu ksu_handle_execveat trong fs/exec.c"; exit 1; }
           echo ">>> Xác nhận source Ignis-Rei đã có sẵn Manual Hook gốc (an toàn boot)."
@@ -971,20 +970,20 @@ jobs:
 
           echo "version=${KSUN_TAG}" >> "$GITHUB_OUTPUT"
 
-      - name: Set Kernel Version String (Stock 4.19.157-perf-g1f9b135a6fcc)
+      - name: Set Kernel Version String (4.19.325-perf)
         run: |
           sed -i 's/^EXTRAVERSION =.*/EXTRAVERSION =/' Makefile
           sed -i 's/-Wdeclaration-after-statement/-Wno-declaration-after-statement/g' Makefile
           rm -f localversion*
 
-          # Loại bỏ dấu '+' khi source có patch
+          # Giữ nguyên 4.19.325-perf và loại bỏ dấu '+' khi source có patch
           cat << 'EOF' > scripts/setlocalversion
           #!/bin/sh
-          printf "%s" "-perf-g1f9b135a6fcc"
+          printf "%s" "-perf"
           EOF
           chmod +x scripts/setlocalversion
 
-          # Ghi đè trực tiếp chuỗi UTS_RELEASE và LINUX_COMPILER vào linux_banner & init_uts_ns
+          # Chỉ thay chuỗi compiler trong init/version.c, giữ nguyên UTS_RELEASE (4.19.325-perf)
           python3 - << 'PYEOF'
           p = "init/version.c"
           with open(p, "r") as f:
@@ -992,8 +991,6 @@ jobs:
           inc = "#include <generated/compile.h>"
           override = (
               inc + "\n"
-              "#undef UTS_RELEASE\n"
-              '#define UTS_RELEASE "4.19.157-perf-g1f9b135a6fcc"\n'
               "#undef LINUX_COMPILER\n"
               '#define LINUX_COMPILER "clang version 10.0.7 for Android NDK, GNU ld (binutils-2.27-bd24d23f) 2.27.0.20170315"\n'
           )
@@ -1002,17 +999,17 @@ jobs:
               f.write(txt.replace(inc, override, 1))
           PYEOF
 
-          sed -i 's/^CONFIG_LOCALVERSION=.*/CONFIG_LOCALVERSION="-perf-g1f9b135a6fcc"/' arch/arm64/configs/vendor/kona-perf_defconfig
-          find arch/arm64/configs -type f -exec sed -i 's/^CONFIG_LOCALVERSION=.*/CONFIG_LOCALVERSION="-perf-g1f9b135a6fcc"/' {} +
+          sed -i 's/^CONFIG_LOCALVERSION=.*/CONFIG_LOCALVERSION="-perf"/' arch/arm64/configs/vendor/kona-perf_defconfig
+          find arch/arm64/configs -type f -exec sed -i 's/^CONFIG_LOCALVERSION=.*/CONFIG_LOCALVERSION="-perf"/' {} +
           find arch/arm64/configs -type f -exec sed -i 's/^CONFIG_LOCALVERSION_AUTO=y/# CONFIG_LOCALVERSION_AUTO is not set/' {} +
 
           MUNCH_CFG="arch/arm64/configs/vendor/xiaomi/munch.config"
           if [ -f "$MUNCH_CFG" ]; then
             sed -i '/^CONFIG_LOCALVERSION=/d' "$MUNCH_CFG"
-            echo 'CONFIG_LOCALVERSION="-perf-g1f9b135a6fcc"' >> "$MUNCH_CFG"
+            echo 'CONFIG_LOCALVERSION="-perf"' >> "$MUNCH_CFG"
           fi
 
-          sed -i -E 's/(--set-str[[:space:]]+LOCALVERSION[[:space:]]+)("[^"]*"|'\''[^'\'']*'\''|[^[:space:]]+)/\1"-perf-g1f9b135a6fcc"/g' build.sh
+          sed -i -E 's/(--set-str[[:space:]]+LOCALVERSION[[:space:]]+)("[^"]*"|'\''[^'\'']*'\''|[^[:space:]]+)/\1"-perf"/g' build.sh
           sed -i -E 's/\bLOCALVERSION=("[^"]*"|'\''[^'\'']*'\''|[^[:space:]]+)/LOCALVERSION=""/g' build.sh
           sed -i '/KBUILD_BUILD_USER=/d;/KBUILD_BUILD_HOST=/d' build.sh
 
@@ -1094,7 +1091,7 @@ jobs:
           body: |
             ### Build Info
             - **Device:** Xiaomi Redmi K40S - POCO F4 (`munch`)
-            - **Kernel Version:** `4.19.157-perf-g1f9b135a6fcc` (spoofed stock `OS1.0.15.0.ULMCNXM`)
+            - **Kernel Version:** `4.19.325-perf`
             - **Hook Mode:** `CONFIG_KSU_MANUAL_HOOK=y` (Clean `sys_call_table`)
             - **Toolchain:** `${{ steps.toolchain.outputs.clang_version }}`
             - **Branch:** `${{ steps.meta.outputs.raw_branch }}`
@@ -1223,7 +1220,7 @@ jobs:
           body: |
             ### Build Info
             - **Device:** Xiaomi Redmi K40S - POCO F4 (`munch`)
-            - **Kernel Version:** `4.19.157-perf-g1f9b135a6fcc` (spoofed stock `OS1.0.15.0.ULMCNXM`)
+            - **Kernel Version:** `4.19.325-perf`
             - **Hook Mode:** `CONFIG_KSU_MANUAL_HOOK=y` (Clean `sys_call_table`)
             - **Toolchain:** `${{ steps.toolchain.outputs.clang_version }}`
             - **Branch:** `${{ steps.meta.outputs.raw_branch }}`
