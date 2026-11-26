@@ -18,7 +18,7 @@ on:
           - aosp
           - stock
       build_type:
-        description: 'Loại Kernel (all = build cả 2: ksun-nosusfs, ksun-susfs)'
+        description: 'Loại Kernel (all = đẩy nosusfs trước rồi mới build tiếp susfs)'
         required: true
         default: 'all'
         type: choice
@@ -71,7 +71,6 @@ jobs:
               print("::error::Không tìm thấy thư mục mã nguồn drivers/kernelsu!", flush=True)
               sys.exit(1)
 
-          # Quét toàn bộ mã nguồn KernelSU-Next để lấy đúng tên hàm & chữ ký con trỏ
           ksu_blob = []
           for dp, _, fns in os.walk(ksu_dir):
               for fn in fns:
@@ -290,7 +289,7 @@ jobs:
           root = sys.argv[1]
           susfs_419_repo = sys.argv[2]
           wild_repo = sys.argv[3]
-          mode = sys.argv[4]  # "preflight" hoặc "apply"
+          mode = sys.argv[4]
           extra_repos = sys.argv[5:]
           report_path = "/tmp/susfs_preflight_report.txt"
 
@@ -316,7 +315,6 @@ jobs:
               print(output, flush=True)
               sys.exit(1)
 
-          # 1. Tìm file patch SuSFS mới nhất cho kernel 4.19 và thư mục source susfs (nếu có)
           kernel_patch = None
           susfs_c_file = None
           susfs_inc_dir = None
@@ -350,7 +348,6 @@ jobs:
               return "\n".join(added)
 
           def autofix_kernel_rejects(work_dir):
-              # 1) Auto-fix fs/namespace.c (backport fs_context: vfs_kern_mount -> vfs_create_mount & clone_mnt)
               ns_c = os.path.join(work_dir, "fs/namespace.c")
               ns_rej = ns_c + ".rej"
               if os.path.exists(ns_rej) and os.path.exists(ns_c):
@@ -363,7 +360,6 @@ jobs:
                   remaining = []
 
                   for h in hunks[1:]:
-                      # 1a) vfs_kern_mount -> vfs_create_mount
                       if "vfs_kern_mount" in h and "alloc_vfsmnt(" in h:
                           patched_ns = False
                           m_fn = re.search(
@@ -401,7 +397,6 @@ jobs:
                           if not patched_ns:
                               remaining.append(h)
 
-                      # 1b) clone_mnt
                       elif "clone_mnt" in h and "old->mnt_devname" in h:
                           patched_clone = False
                           m_fn = re.search(r'static\s+struct\s+mount\s*\*clone_mnt\s*\([^)]*\)\s*\{', src, flags=re.S)
@@ -439,7 +434,6 @@ jobs:
                       with open(ns_rej, "w") as f:
                           f.write(header + "".join(remaining))
 
-              # 2) Auto-fix kernel/sys.c
               sys_c = os.path.join(work_dir, "kernel/sys.c")
               sys_rej = sys_c + ".rej"
               if os.path.exists(sys_rej) and os.path.exists(sys_c):
@@ -467,7 +461,6 @@ jobs:
                       os.remove(sys_rej)
                       print(">>> Auto-fixed kernel/sys.c thành công!", flush=True)
 
-              # 3) Auto-fix #include <linux/susfs_def.h> trong fs/proc/task_mmu.c
               mmu_c = os.path.join(work_dir, "fs/proc/task_mmu.c")
               mmu_rej = mmu_c + ".rej"
               if os.path.exists(mmu_rej) and os.path.exists(mmu_c):
@@ -500,7 +493,6 @@ jobs:
                       with open(mmu_rej, "w") as f:
                           f.write(header + "".join(remaining))
 
-              # 4) Auto-fix #include <linux/susfs.h> & <linux/susfs_def.h> trong fs/stat.c
               stat_c = os.path.join(work_dir, "fs/stat.c")
               stat_rej = stat_c + ".rej"
               if os.path.exists(stat_c):
@@ -561,7 +553,6 @@ jobs:
                   if fn.startswith("susfs") and fn.endswith(".h"):
                       shutil.copy2(os.path.join(susfs_inc_dir, fn), os.path.join(work_dir, "include", "linux", fn))
 
-          # Áp patch SuSFS cho kernel 4.19
           with open(kernel_patch, "rb") as pf:
               subprocess.run(
                   ["patch", "-p1", "--forward", "--batch", "--fuzz=3"],
@@ -578,7 +569,6 @@ jobs:
           if rej_files:
               dump_rejects("Patch SuSFS cho kernel 4.19 vẫn còn file .rej cần xử lý", work_dir, rej_files)
 
-          # Đọc SUSFS_VERSION sau khi patch đã tạo include/linux/susfs.h
           susfs_ver = "unknown"
           patched_susfs_h = os.path.join(work_dir, "include", "linux", "susfs.h")
           patched_susfs_def_h = os.path.join(work_dir, "include", "linux", "susfs_def.h")
@@ -591,18 +581,9 @@ jobs:
 
           print(f">>> Áp patch SuSFS ({susfs_ver}) cho kernel 4.19 thành công (0 .rej)!", flush=True)
 
-          # 2. Tích hợp SuSFS cho KernelSU-Next
           ksu_kconfig = os.path.realpath(os.path.join(root, "drivers/kernelsu/Kconfig"))
           ksu_dir = os.path.dirname(ksu_kconfig)
           ksu_root = os.path.dirname(ksu_dir) if os.path.basename(ksu_dir) == "kernel" else ksu_dir
-
-          for mf in ("Makefile", "Kbuild"):
-              mp = os.path.join(ksu_dir, mf)
-              if os.path.isfile(mp):
-                  with open(mp, "r") as f:
-                      for line in f:
-                          if "KSU_VERSION" in line or "VERSION" in line:
-                              print(f">>> {mf}: {line.strip()}", flush=True)
 
           def verify_ksu_susfs_symbols(test_dir):
               combined = []
@@ -695,7 +676,13 @@ jobs:
           def ensure_susfs_includes(src):
               if "linux/susfs.h" in src and "linux/susfs_def.h" in src:
                   return src
-              inc = "\n#ifdef CONFIG_KSU_SUSFS\n#include <linux/susfs.h>\n#include <linux/susfs_def.h>\n#endif\n"
+              inc = (
+                  "\n#include <linux/version.h>\n"
+                  "#ifdef CONFIG_KSU_SUSFS\n"
+                  "#include <linux/susfs.h>\n"
+                  "#include <linux/susfs_def.h>\n"
+                  "#endif\n"
+              )
               depth = 0
               last_top_include_end = None
               first_include_start = None
@@ -833,6 +820,23 @@ jobs:
                       sel_c = f.read()
                   if "susfs_is_current_ksu_domain" not in sel_c:
                       sel_c = ensure_susfs_includes(sel_c)
+                      if '#include "objsec.h"' not in sel_c and '<objsec.h>' not in sel_c:
+                          sel_c = '#include "objsec.h"\n' + sel_c
+                      has_cur_sid = bool(re.search(r'\bu32\s+current_sid\s*\(', sel_c))
+                      cur_sid_fn = "" if has_cur_sid else (
+                          'static inline u32 susfs_cur_sid_fallback(void)\n'
+                          '{\n'
+                          '#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 1, 0)\n'
+                          '\tconst struct task_security_struct *tsec = current_cred()->security;\n'
+                          '#elif LINUX_VERSION_CODE < KERNEL_VERSION(6, 18, 0)\n'
+                          '\tconst struct task_security_struct *tsec = selinux_cred(current_cred());\n'
+                          '#else\n'
+                          '\tconst struct cred_security_struct *tsec = selinux_cred(current_cred());\n'
+                          '#endif\n'
+                          '\treturn tsec ? tsec->sid : 0;\n'
+                          '}\n'
+                          '#define current_sid() susfs_cur_sid_fallback()\n\n'
+                      )
                       sel_c += (
                           '\n#ifdef CONFIG_KSU_SUSFS\n'
                           '#define KERNEL_INIT_DOMAIN "u:r:init:s0"\n'
@@ -842,6 +846,7 @@ jobs:
                           'u32 susfs_init_sid __read_mostly = 0;\n'
                           'u32 susfs_zygote_sid __read_mostly = 0;\n'
                           'u32 susfs_priv_app_sid __read_mostly = 0;\n\n'
+                          + cur_sid_fn +
                           'static inline void susfs_set_sid(const char *secctx_name, u32 *out_sid)\n'
                           '{\n'
                           '\tint err;\n'
@@ -858,7 +863,9 @@ jobs:
                           '}\n\n'
                           'bool susfs_is_sid_equal(const struct cred *cred, u32 sid2)\n'
                           '{\n'
-                          '#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 18, 0)\n'
+                          '#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 1, 0)\n'
+                          '\tconst struct task_security_struct *tsec = cred->security;\n'
+                          '#elif LINUX_VERSION_CODE < KERNEL_VERSION(6, 18, 0)\n'
                           '\tconst struct task_security_struct *tsec = selinux_cred(cred);\n'
                           '#else\n'
                           '\tconst struct cred_security_struct *tsec = selinux_cred(cred);\n'
@@ -1124,28 +1131,6 @@ jobs:
               print(f">>> Tích hợp SuSFS ({susfs_ver}) vào KernelSU-Next thành công (0 .rej, đủ toàn bộ symbol)!", flush=True)
           PYEOF
 
-      - name: Pre-flight Check SuSFS Patch (Fail-Fast ~20s)
-        if: ${{ (github.event.inputs.build_type || 'all') == 'all' || (github.event.inputs.build_type || 'all') == 'ksun-susfs' }}
-        run: |
-          if grep -rq "config KSU_SUSFS" drivers/kernelsu/ KernelSU-Next/ KernelSU/ fs/ 2>/dev/null; then
-            echo ">>> Nhánh đã tích hợp sẵn SuSFS, bỏ qua bước tải patch."
-          else
-            echo ">>> Tải backport SuSFS mới nhất (4.19) & các repo patch KSUN..."
-            rm -rf /tmp/susfs_419 /tmp/wild_patches /tmp/susfs4ksu
-            git clone --depth=1 https://github.com/JackA1ltman/NonGKI_Kernel_Build_2nd.git /tmp/susfs_419
-            git clone --depth=1 https://github.com/WildKernels/kernel_patches.git /tmp/wild_patches
-            git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git /tmp/susfs4ksu || true
-            python3 /tmp/apply_susfs.py "$GITHUB_WORKSPACE" /tmp/susfs_419 /tmp/wild_patches preflight /tmp/susfs4ksu
-          fi
-
-      - name: Upload SuSFS Rejects Report (on Pre-flight Failure)
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: susfs-rejects-report
-          path: /tmp/susfs_preflight_report.txt
-          if-no-files-found: ignore
-
       - name: Install Build Dependencies
         run: |
           sudo apt-get update
@@ -1189,212 +1174,6 @@ jobs:
           echo ">>> Toolchain đã sẵn sàng: ${CLANG_VER}"
           echo "clang_version=${CLANG_VER}" >> "$GITHUB_OUTPUT"
 
-      - name: Set Kernel Version String (Stock 4.19.157-perf-g1f9b135a6fcc)
-        run: |
-          sed -i 's/^EXTRAVERSION =.*/EXTRAVERSION =/' Makefile
-          rm -f localversion*
-
-          # Giả lập chuỗi uname -r và /proc/version giống hệt stock OS1.0.15.0.ULMCNXM
-          sed -i 's/UTS_RELEASE \\"$(KERNELRELEASE)\\"/UTS_RELEASE \\"4.19.157-perf-g1f9b135a6fcc\\"/' Makefile
-
-          # Giả lập chuỗi compiler Android NDK clang 10.0.7 của munch stock
-          if [ -f "scripts/mkcompile_h" ]; then
-            sed -i -E 's|^([[:space:]]*echo[[:space:]]+\\#define[[:space:]]+LINUX_COMPILER).*|\1 \\"clang version 10.0.7 for Android NDK, GNU ld (binutils-2.27-bd24d23f) 2.27.0.20170315\\"|' scripts/mkcompile_h
-          fi
-
-          sed -i 's/^CONFIG_LOCALVERSION=.*/CONFIG_LOCALVERSION="-perf-g1f9b135a6fcc"/' arch/arm64/configs/vendor/kona-perf_defconfig
-          find arch/arm64/configs -type f -exec sed -i 's/^CONFIG_LOCALVERSION=.*/CONFIG_LOCALVERSION="-perf-g1f9b135a6fcc"/' {} +
-          find arch/arm64/configs -type f -exec sed -i 's/^CONFIG_LOCALVERSION_AUTO=y/# CONFIG_LOCALVERSION_AUTO is not set/' {} +
-
-          MUNCH_CFG="arch/arm64/configs/vendor/xiaomi/munch.config"
-          if [ -f "$MUNCH_CFG" ]; then
-            sed -i '/^CONFIG_LOCALVERSION=/d' "$MUNCH_CFG"
-            echo 'CONFIG_LOCALVERSION="-perf-g1f9b135a6fcc"' >> "$MUNCH_CFG"
-          fi
-
-          sed -i -E 's/(--set-str[[:space:]]+LOCALVERSION[[:space:]]+)("[^"]*"|'\''[^'\'']*'\''|[^[:space:]]+)/\1"-perf-g1f9b135a6fcc"/g' build.sh
-          sed -i -E 's/\bLOCALVERSION=("[^"]*"|'\''[^'\'']*'\''|[^[:space:]]+)/LOCALVERSION=""/g' build.sh
-          sed -i '/KBUILD_BUILD_USER=/d;/KBUILD_BUILD_HOST=/d' build.sh
-
-      - name: Compile and Package Kernel (KSU-Next Manual-Hook No-SuSFS / KSU-Next Manual-Hook SuSFS)
-        id: build
-        run: |
-          chmod +x build.sh
-          mkdir -p release_zips
-
-          MUNCH_CFG="arch/arm64/configs/vendor/xiaomi/munch.config"
-          cp "$MUNCH_CFG" "${MUNCH_CFG}.bak"
-
-          VARIANT="${{ github.event.inputs.variant || 'both' }}"
-          BUILD_TYPE="${{ github.event.inputs.build_type || 'all' }}"
-
-          run_kbuild() {
-            set +e
-            CLANG_PATH="${GITHUB_WORKSPACE}/clang" ./build.sh "$VARIANT" 2>&1 | tee /tmp/kbuild.log
-            local rc=${PIPESTATUS[0]}
-            set -e
-            if [ "$rc" -ne 0 ]; then
-              echo "::error::Build kernel thất bại (exit code ${rc}). Chi tiết lỗi compiler:"
-              grep -E "(: error:|fatal error:|undefined reference)" /tmp/kbuild.log | tail -n 40 || true
-              exit "$rc"
-            fi
-          }
-
-          verify_config_flag() {
-            local mode="$1"
-            local flag="$2"
-            local found=0
-            for cfg in out/.config out/*/.config; do
-              [ -f "$cfg" ] || continue
-              found=1
-              if [ "$mode" = "must_on" ] && ! grep -q "^${flag}=y" "$cfg"; then
-                echo "::error::${flag}=y không được bật trong ${cfg}!"
-                exit 1
-              fi
-              if [ "$mode" = "must_off" ] && grep -q "^${flag}=y" "$cfg"; then
-                echo "::error::${flag}=y vẫn đang bật trong ${cfg}!"
-                exit 1
-              fi
-            done
-            if [ "$found" -eq 0 ]; then
-              echo "::warning::Không tìm thấy file .config trong out/ để kiểm tra ${flag}"
-            fi
-          }
-
-          print_kernel_release() {
-            for kr in out/include/config/kernel.release out/*/include/config/kernel.release; do
-              [ -f "$kr" ] && echo ">>> Kernel Release (${kr}): $(cat "$kr")"
-            done
-          }
-
-          detect_susfs_version() {
-            local ver=""
-            for h in include/linux/susfs.h $(find /tmp/susfs_419 /tmp/susfs4ksu -maxdepth 5 -name "susfs.h" 2>/dev/null); do
-              [ -f "$h" ] || continue
-              ver=$(grep -E '^[[:space:]]*#define[[:space:]]+SUSFS_VERSION[[:space:]]+' "$h" | head -n1 | sed -E 's/.*"([^"]+)".*/\1/' | tr -d '[:space:]')
-              [ -n "$ver" ] && break
-            done
-            if [ -z "$ver" ]; then
-              echo "latest"
-            elif [[ "$ver" == v* ]]; then
-              echo "$ver"
-            else
-              echo "v${ver}"
-            fi
-          }
-
-          # ==========================================
-          # 1. BUILD KSU-NEXT NO-SUSFS (Manual Hook - Không sửa sys_call_table)
-          # ==========================================
-          if [ "$BUILD_TYPE" = "ksun-nosusfs" ] || [ "$BUILD_TYPE" = "all" ]; then
-            echo "=========================================="
-            echo ">>> [1/2] Đang patch Manual Hook & build KernelSU-Next (No-SuSFS)..."
-            echo "=========================================="
-            python3 /tmp/apply_ksun_manual_hook.py "$GITHUB_WORKSPACE"
-
-            cp "${MUNCH_CFG}.bak" "$MUNCH_CFG"
-            sed -i '/^CONFIG_KSU/d;/^# CONFIG_KSU/d' "$MUNCH_CFG"
-            sed -i '/^CONFIG_IKCONFIG/d;/^# CONFIG_IKCONFIG/d;/^CONFIG_KALLSYMS_ALL/d' "$MUNCH_CFG"
-            cat << 'EOF' >> "$MUNCH_CFG"
-          CONFIG_KSU=y
-          CONFIG_KSU_MANUAL_HOOK=y
-          # CONFIG_KSU_SYSCALL_TABLE_HOOK is not set
-          # CONFIG_KSU_KPROBES_HOOK is not set
-          # CONFIG_KSU_SUSFS is not set
-          # CONFIG_IKCONFIG is not set
-          # CONFIG_IKCONFIG_PROC is not set
-          # CONFIG_KALLSYMS_ALL is not set
-          EOF
-
-            rm -rf out/aosp out/stock out/*.zip
-            run_kbuild
-
-            verify_config_flag must_on CONFIG_KSU
-            verify_config_flag must_on CONFIG_KSU_MANUAL_HOOK
-            verify_config_flag must_off CONFIG_KSU_SYSCALL_TABLE_HOOK
-            verify_config_flag must_off CONFIG_KSU_SUSFS
-            verify_config_flag must_off CONFIG_IKCONFIG_PROC
-            print_kernel_release
-
-            for f in out/*.zip; do
-              [ -e "$f" ] || continue
-              base=$(basename "$f" .zip)
-              mv "$f" "release_zips/${base}-ksun-nosusfs.zip"
-            done
-          fi
-
-          # ==========================================
-          # 2. BUILD KSU-NEXT SUSFS (Manual Hook + SuSFS mới nhất)
-          # ==========================================
-          if [ "$BUILD_TYPE" = "ksun-susfs" ] || [ "$BUILD_TYPE" = "all" ]; then
-            echo "=========================================="
-            echo ">>> [2/2] Đang chuẩn bị & build KernelSU-Next (Manual Hook + SuSFS)..."
-            echo "=========================================="
-
-            if ! grep -rq "config KSU_SUSFS" drivers/kernelsu/ KernelSU-Next/ KernelSU/ fs/ 2>/dev/null; then
-              if [ ! -d /tmp/susfs_419 ]; then
-                git clone --depth=1 https://github.com/JackA1ltman/NonGKI_Kernel_Build_2nd.git /tmp/susfs_419
-                git clone --depth=1 https://github.com/WildKernels/kernel_patches.git /tmp/wild_patches
-                git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git /tmp/susfs4ksu || true
-              fi
-              python3 /tmp/apply_susfs.py "$GITHUB_WORKSPACE" /tmp/susfs_419 /tmp/wild_patches apply /tmp/susfs4ksu
-            fi
-
-            # Đảm bảo toàn bộ Manual Hook (bao gồm ksu_handle_sys_reboot) được chèn đầy đủ
-            python3 /tmp/apply_ksun_manual_hook.py "$GITHUB_WORKSPACE"
-
-            SUSFS_VER=$(detect_susfs_version)
-            echo ">>> Phiên bản SuSFS phát hiện được: ${SUSFS_VER}"
-            echo "susfs_version=${SUSFS_VER}" >> "$GITHUB_OUTPUT"
-
-            cp "${MUNCH_CFG}.bak" "$MUNCH_CFG"
-            sed -i '/^CONFIG_KSU/d;/^# CONFIG_KSU/d' "$MUNCH_CFG"
-            sed -i '/^CONFIG_IKCONFIG/d;/^# CONFIG_IKCONFIG/d;/^CONFIG_KALLSYMS_ALL/d' "$MUNCH_CFG"
-
-            cat << 'EOF' >> "$MUNCH_CFG"
-          CONFIG_KSU=y
-          CONFIG_KSU_MANUAL_HOOK=y
-          # CONFIG_KSU_SYSCALL_TABLE_HOOK is not set
-          # CONFIG_KSU_KPROBES_HOOK is not set
-          # CONFIG_IKCONFIG is not set
-          # CONFIG_IKCONFIG_PROC is not set
-          # CONFIG_KALLSYMS_ALL is not set
-          CONFIG_KSU_SUSFS=y
-          CONFIG_KSU_SUSFS_SUS_PATH=y
-          CONFIG_KSU_SUSFS_SUS_MOUNT=y
-          CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y
-          CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y
-          CONFIG_KSU_SUSFS_SUS_KSTAT=y
-          CONFIG_KSU_SUSFS_TRY_UMOUNT=y
-          CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y
-          CONFIG_KSU_SUSFS_SPOOF_UNAME=y
-          CONFIG_KSU_SUSFS_ENABLE_LOG=y
-          CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
-          CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
-          CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
-          CONFIG_KSU_SUSFS_SUS_MAP=y
-          EOF
-
-            rm -rf out/aosp out/stock out/*.zip
-            run_kbuild
-
-            verify_config_flag must_on CONFIG_KSU
-            verify_config_flag must_on CONFIG_KSU_MANUAL_HOOK
-            verify_config_flag must_off CONFIG_KSU_SYSCALL_TABLE_HOOK
-            verify_config_flag must_on CONFIG_KSU_SUSFS
-            verify_config_flag must_off CONFIG_IKCONFIG_PROC
-            print_kernel_release
-
-            for f in out/*.zip; do
-              [ -e "$f" ] || continue
-              base=$(basename "$f" .zip)
-              mv "$f" "release_zips/${base}-ksun-susfs-${SUSFS_VER}.zip"
-            done
-          fi
-
-          mv "${MUNCH_CFG}.bak" "$MUNCH_CFG"
-          ls -lh release_zips/
-
       - name: Download Latest KernelSU-Next Manager APKs
         id: ksun
         run: |
@@ -1419,15 +1198,106 @@ jobs:
 
           echo "version=${KSUN_TAG}" >> "$GITHUB_OUTPUT"
 
-      - name: Upload Flashable AnyKernel3 Zip
+      - name: Set Kernel Version String (Stock 4.19.157-perf-g1f9b135a6fcc)
+        run: |
+          sed -i 's/^EXTRAVERSION =.*/EXTRAVERSION =/' Makefile
+          sed -i 's/-Wdeclaration-after-statement/-Wno-declaration-after-statement/g' Makefile
+          rm -f localversion*
+
+          # Giả lập chuỗi uname -r và /proc/version giống hệt stock OS1.0.15.0.ULMCNXM
+          sed -i 's/UTS_RELEASE \\"$(KERNELRELEASE)\\"/UTS_RELEASE \\"4.19.157-perf-g1f9b135a6fcc\\"/' Makefile
+
+          # Giả lập chuỗi compiler Android NDK clang 10.0.7 của munch stock
+          if [ -f "scripts/mkcompile_h" ]; then
+            sed -i -E 's|^([[:space:]]*echo[[:space:]]+\\#define[[:space:]]+LINUX_COMPILER).*|\1 \\"clang version 10.0.7 for Android NDK, GNU ld (binutils-2.27-bd24d23f) 2.27.0.20170315\\"|' scripts/mkcompile_h
+          fi
+
+          sed -i 's/^CONFIG_LOCALVERSION=.*/CONFIG_LOCALVERSION="-perf-g1f9b135a6fcc"/' arch/arm64/configs/vendor/kona-perf_defconfig
+          find arch/arm64/configs -type f -exec sed -i 's/^CONFIG_LOCALVERSION=.*/CONFIG_LOCALVERSION="-perf-g1f9b135a6fcc"/' {} +
+          find arch/arm64/configs -type f -exec sed -i 's/^CONFIG_LOCALVERSION_AUTO=y/# CONFIG_LOCALVERSION_AUTO is not set/' {} +
+
+          MUNCH_CFG="arch/arm64/configs/vendor/xiaomi/munch.config"
+          if [ -f "$MUNCH_CFG" ]; then
+            sed -i '/^CONFIG_LOCALVERSION=/d' "$MUNCH_CFG"
+            echo 'CONFIG_LOCALVERSION="-perf-g1f9b135a6fcc"' >> "$MUNCH_CFG"
+          fi
+
+          sed -i -E 's/(--set-str[[:space:]]+LOCALVERSION[[:space:]]+)("[^"]*"|'\''[^'\'']*'\''|[^[:space:]]+)/\1"-perf-g1f9b135a6fcc"/g' build.sh
+          sed -i -E 's/\bLOCALVERSION=("[^"]*"|'\''[^'\'']*'\''|[^[:space:]]+)/LOCALVERSION=""/g' build.sh
+          sed -i '/KBUILD_BUILD_USER=/d;/KBUILD_BUILD_HOST=/d' build.sh
+
+      # ========================================================
+      # GIAI ĐOẠN 1: BUILD & ĐẨY NGAY KSU-NEXT NO-SUSFS RA ACTION
+      # ========================================================
+      - name: "[1/2] Compile KSU-Next No-SuSFS (Manual Hook)"
+        if: ${{ (github.event.inputs.build_type || 'all') == 'ksun-nosusfs' || (github.event.inputs.build_type || 'all') == 'all' }}
+        run: |
+          chmod +x build.sh
+          mkdir -p release_zips
+
+          MUNCH_CFG="arch/arm64/configs/vendor/xiaomi/munch.config"
+          cp "$MUNCH_CFG" "${MUNCH_CFG}.bak"
+
+          VARIANT="${{ github.event.inputs.variant || 'both' }}"
+
+          echo "=========================================="
+          echo ">>> [1/2] Đang patch Manual Hook & build KernelSU-Next (No-SuSFS)..."
+          echo "=========================================="
+          python3 /tmp/apply_ksun_manual_hook.py "$GITHUB_WORKSPACE"
+
+          sed -i '/^CONFIG_KSU/d;/^# CONFIG_KSU/d' "$MUNCH_CFG"
+          sed -i '/^CONFIG_IKCONFIG/d;/^# CONFIG_IKCONFIG/d;/^CONFIG_KALLSYMS_ALL/d' "$MUNCH_CFG"
+          cat << 'EOF' >> "$MUNCH_CFG"
+          CONFIG_KSU=y
+          CONFIG_KSU_MANUAL_HOOK=y
+          # CONFIG_KSU_SYSCALL_TABLE_HOOK is not set
+          # CONFIG_KSU_KPROBES_HOOK is not set
+          # CONFIG_KSU_SUSFS is not set
+          # CONFIG_IKCONFIG is not set
+          # CONFIG_IKCONFIG_PROC is not set
+          # CONFIG_KALLSYMS_ALL is not set
+          EOF
+
+          rm -rf out/aosp out/stock out/*.zip
+          set +e
+          CLANG_PATH="${GITHUB_WORKSPACE}/clang" ./build.sh "$VARIANT" 2>&1 | tee /tmp/kbuild_nosusfs.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::Build ksun-nosusfs thất bại (exit code ${rc}):"
+            grep -E "(: error:|fatal error:|undefined reference)" /tmp/kbuild_nosusfs.log | tail -n 40 || true
+            exit "$rc"
+          fi
+
+          for cfg in out/.config out/*/.config; do
+            [ -f "$cfg" ] || continue
+            grep -q "^CONFIG_KSU=y" "$cfg" || { echo "::error::CONFIG_KSU=y tắt trong ${cfg}"; exit 1; }
+            grep -q "^CONFIG_KSU_MANUAL_HOOK=y" "$cfg" || { echo "::error::CONFIG_KSU_MANUAL_HOOK=y tắt trong ${cfg}"; exit 1; }
+            grep -q "^CONFIG_KSU_SYSCALL_TABLE_HOOK=y" "$cfg" && { echo "::error::CONFIG_KSU_SYSCALL_TABLE_HOOK=y bật trong ${cfg}"; exit 1; }
+            grep -q "^CONFIG_KSU_SUSFS=y" "$cfg" && { echo "::error::CONFIG_KSU_SUSFS=y bật trong ${cfg}"; exit 1; }
+            grep -q "^CONFIG_IKCONFIG_PROC=y" "$cfg" && { echo "::error::CONFIG_IKCONFIG_PROC=y bật trong ${cfg}"; exit 1; }
+          done
+
+          for f in out/*.zip; do
+            [ -e "$f" ] || continue
+            base=$(basename "$f" .zip)
+            mv "$f" "release_zips/${base}-ksun-nosusfs.zip"
+          done
+
+          mv "${MUNCH_CFG}.bak" "$MUNCH_CFG"
+          ls -lh release_zips/*-ksun-nosusfs.zip
+
+      - name: "[1/2] Upload No-SuSFS Artifact (Immediate)"
+        if: ${{ (github.event.inputs.build_type || 'all') == 'ksun-nosusfs' || (github.event.inputs.build_type || 'all') == 'all' }}
         uses: actions/upload-artifact@v4
         with:
-          name: Strong-perf-Ignis-Rei-munch-${{ steps.meta.outputs.safe_branch }}-${{ github.event.inputs.variant || 'both' }}-${{ github.event.inputs.build_type || 'all' }}
+          name: Strong-perf-Ignis-Rei-munch-${{ steps.meta.outputs.safe_branch }}-${{ github.event.inputs.variant || 'both' }}-ksun-nosusfs
           path: |
-            release_zips/*.zip
+            release_zips/*-ksun-nosusfs.zip
             ksun/*.apk
 
-      - name: Publish GitHub Release
+      - name: "[1/2] Publish No-SuSFS to GitHub Release (Immediate)"
+        if: ${{ (github.event.inputs.build_type || 'all') == 'ksun-nosusfs' || (github.event.inputs.build_type || 'all') == 'all' }}
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.meta.outputs.tag }}
@@ -1440,9 +1310,140 @@ jobs:
             - **Toolchain:** `${{ steps.toolchain.outputs.clang_version }}`
             - **Branch:** `${{ steps.meta.outputs.raw_branch }}`
             - **Variant:** `${{ github.event.inputs.variant || 'both' }}`
-            - **Build Types:** `${{ github.event.inputs.build_type || 'all' }}` ${{ steps.build.outputs.susfs_version && format('(SuSFS `{0}`)', steps.build.outputs.susfs_version) || '' }}
+            - **Build Date:** ${{ steps.meta.outputs.date }}
+            - **KernelSU-Next Manager:** `${{ steps.ksun.outputs.version }}` (bản thường & bản `-spoofed`)
+            - **Status:** Đã xuất bản bản `ksun-nosusfs` (đang build tiếp `ksun-susfs` nếu chọn `all`).
+          files: |
+            release_zips/*-ksun-nosusfs.zip
+            ksun/*.apk
+
+      # ========================================================
+      # GIAI ĐOẠN 2: PATCH & BUILD TIẾP KSU-NEXT SUSFS
+      # ========================================================
+      - name: "[2/2] Compile KSU-Next SuSFS (Manual Hook + SuSFS)"
+        id: build_susfs
+        if: ${{ (github.event.inputs.build_type || 'all') == 'ksun-susfs' || (github.event.inputs.build_type || 'all') == 'all' }}
+        run: |
+          chmod +x build.sh
+          mkdir -p release_zips
+
+          MUNCH_CFG="arch/arm64/configs/vendor/xiaomi/munch.config"
+          cp "$MUNCH_CFG" "${MUNCH_CFG}.bak"
+
+          VARIANT="${{ github.event.inputs.variant || 'both' }}"
+
+          echo "=========================================="
+          echo ">>> [2/2] Đang chuẩn bị & build KernelSU-Next (Manual Hook + SuSFS)..."
+          echo "=========================================="
+
+          if ! grep -rq "config KSU_SUSFS" drivers/kernelsu/ KernelSU-Next/ KernelSU/ fs/ 2>/dev/null; then
+            rm -rf /tmp/susfs_419 /tmp/wild_patches /tmp/susfs4ksu
+            git clone --depth=1 https://github.com/JackA1ltman/NonGKI_Kernel_Build_2nd.git /tmp/susfs_419
+            git clone --depth=1 https://github.com/WildKernels/kernel_patches.git /tmp/wild_patches
+            git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git /tmp/susfs4ksu || true
+            python3 /tmp/apply_susfs.py "$GITHUB_WORKSPACE" /tmp/susfs_419 /tmp/wild_patches apply /tmp/susfs4ksu
+          fi
+
+          python3 /tmp/apply_ksun_manual_hook.py "$GITHUB_WORKSPACE"
+
+          VER=""
+          for h in include/linux/susfs.h $(find /tmp/susfs_419 /tmp/susfs4ksu -maxdepth 5 -name "susfs.h" 2>/dev/null); do
+            [ -f "$h" ] || continue
+            VER=$(grep -E '^[[:space:]]*#define[[:space:]]+SUSFS_VERSION[[:space:]]+' "$h" | head -n1 | sed -E 's/.*"([^"]+)".*/\1/' | tr -d '[:space:]')
+            [ -n "$VER" ] && break
+          done
+          if [ -z "$VER" ]; then
+            SUSFS_VER="latest"
+          elif [[ "$VER" == v* ]]; then
+            SUSFS_VER="$VER"
+          else
+            SUSFS_VER="v${VER}"
+          fi
+          echo ">>> Phiên bản SuSFS phát hiện được: ${SUSFS_VER}"
+          echo "susfs_version=${SUSFS_VER}" >> "$GITHUB_OUTPUT"
+
+          sed -i '/^CONFIG_KSU/d;/^# CONFIG_KSU/d' "$MUNCH_CFG"
+          sed -i '/^CONFIG_IKCONFIG/d;/^# CONFIG_IKCONFIG/d;/^CONFIG_KALLSYMS_ALL/d' "$MUNCH_CFG"
+
+          cat << 'EOF' >> "$MUNCH_CFG"
+          CONFIG_KSU=y
+          CONFIG_KSU_MANUAL_HOOK=y
+          # CONFIG_KSU_SYSCALL_TABLE_HOOK is not set
+          # CONFIG_KSU_KPROBES_HOOK is not set
+          # CONFIG_IKCONFIG is not set
+          # CONFIG_IKCONFIG_PROC is not set
+          # CONFIG_KALLSYMS_ALL is not set
+          CONFIG_KSU_SUSFS=y
+          CONFIG_KSU_SUSFS_SUS_PATH=y
+          CONFIG_KSU_SUSFS_SUS_MOUNT=y
+          CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y
+          CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y
+          CONFIG_KSU_SUSFS_SUS_KSTAT=y
+          CONFIG_KSU_SUSFS_TRY_UMOUNT=y
+          CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y
+          CONFIG_KSU_SUSFS_SPOOF_UNAME=y
+          CONFIG_KSU_SUSFS_ENABLE_LOG=y
+          CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
+          CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
+          CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
+          CONFIG_KSU_SUSFS_SUS_MAP=y
+          EOF
+
+          rm -rf out/aosp out/stock out/*.zip
+          set +e
+          CLANG_PATH="${GITHUB_WORKSPACE}/clang" ./build.sh "$VARIANT" 2>&1 | tee /tmp/kbuild_susfs.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::Build ksun-susfs thất bại (exit code ${rc}):"
+            grep -E "(: error:|fatal error:|undefined reference)" /tmp/kbuild_susfs.log | tail -n 40 || true
+            exit "$rc"
+          fi
+
+          for cfg in out/.config out/*/.config; do
+            [ -f "$cfg" ] || continue
+            grep -q "^CONFIG_KSU=y" "$cfg" || { echo "::error::CONFIG_KSU=y tắt trong ${cfg}"; exit 1; }
+            grep -q "^CONFIG_KSU_MANUAL_HOOK=y" "$cfg" || { echo "::error::CONFIG_KSU_MANUAL_HOOK=y tắt trong ${cfg}"; exit 1; }
+            grep -q "^CONFIG_KSU_SYSCALL_TABLE_HOOK=y" "$cfg" && { echo "::error::CONFIG_KSU_SYSCALL_TABLE_HOOK=y bật trong ${cfg}"; exit 1; }
+            grep -q "^CONFIG_KSU_SUSFS=y" "$cfg" || { echo "::error::CONFIG_KSU_SUSFS=y tắt trong ${cfg}"; exit 1; }
+            grep -q "^CONFIG_IKCONFIG_PROC=y" "$cfg" && { echo "::error::CONFIG_IKCONFIG_PROC=y bật trong ${cfg}"; exit 1; }
+          done
+
+          for f in out/*.zip; do
+            [ -e "$f" ] || continue
+            base=$(basename "$f" .zip)
+            mv "$f" "release_zips/${base}-ksun-susfs-${SUSFS_VER}.zip"
+          done
+
+          mv "${MUNCH_CFG}.bak" "$MUNCH_CFG"
+          ls -lh release_zips/
+
+      - name: "[2/2] Upload SuSFS Artifact"
+        if: ${{ (github.event.inputs.build_type || 'all') == 'ksun-susfs' || (github.event.inputs.build_type || 'all') == 'all' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: Strong-perf-Ignis-Rei-munch-${{ steps.meta.outputs.safe_branch }}-${{ github.event.inputs.variant || 'both' }}-ksun-susfs
+          path: |
+            release_zips/*-ksun-susfs-*.zip
+            ksun/*.apk
+
+      - name: "[2/2] Append SuSFS to GitHub Release"
+        if: ${{ (github.event.inputs.build_type || 'all') == 'ksun-susfs' || (github.event.inputs.build_type || 'all') == 'all' }}
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: "Strong perf+ Ignis-Rei Kernel (munch) [${{ steps.meta.outputs.raw_branch }}] - ${{ github.event.inputs.variant || 'both' }} (${{ steps.meta.outputs.date }})"
+          body: |
+            ### Build Info
+            - **Device:** Xiaomi Redmi K40S - POCO F4 (`munch`)
+            - **Kernel Version:** `4.19.157-perf-g1f9b135a6fcc` (spoofed stock `OS1.0.15.0.ULMCNXM`)
+            - **Hook Mode:** `CONFIG_KSU_MANUAL_HOOK=y` (Clean `sys_call_table`)
+            - **Toolchain:** `${{ steps.toolchain.outputs.clang_version }}`
+            - **Branch:** `${{ steps.meta.outputs.raw_branch }}`
+            - **Variant:** `${{ github.event.inputs.variant || 'both' }}`
+            - **Build Types:** `${{ github.event.inputs.build_type || 'all' }}` (SuSFS `${{ steps.build_susfs.outputs.susfs_version }}`)
             - **Build Date:** ${{ steps.meta.outputs.date }}
             - **KernelSU-Next Manager:** `${{ steps.ksun.outputs.version }}` (bản thường & bản `-spoofed`)
           files: |
-            release_zips/*.zip
+            release_zips/*-ksun-susfs-*.zip
             ksun/*.apk
