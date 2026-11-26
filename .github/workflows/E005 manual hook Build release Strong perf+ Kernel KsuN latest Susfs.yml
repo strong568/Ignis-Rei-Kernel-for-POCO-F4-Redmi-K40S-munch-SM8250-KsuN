@@ -1,4 +1,4 @@
-name: e005 Manual-Hook Build release Strong perf+ Kernel - Ignis-Rei (munch)_KsuNext latest SUSFS -  Neutron Clang 24 - spoofed stock `OS1.0.15.0.ULMCNXM
+name: e005 Manual-Hook Build release Strong perf+ Kernel - Ignis-Rei (munch)_KsuNext latest SUSFS - Neutron Clang 24 - spoofed stock OS1.0.15.0.ULMCNXM
 
 on:
   workflow_dispatch:
@@ -18,7 +18,7 @@ on:
           - aosp
           - stock
       build_type:
-        description: 'Loại Kernel (all = build cả 3: noroot, ksun-nosusfs, ksun-susfs)'
+        description: 'Loại Kernel (all = build cả 2: ksun-nosusfs, ksun-susfs)'
         required: true
         default: 'all'
         type: choice
@@ -26,7 +26,6 @@ on:
           - all
           - ksun-susfs
           - ksun-nosusfs
-          - noroot
 
 permissions:
   contents: write
@@ -1218,7 +1217,7 @@ jobs:
           sed -i -E 's/\bLOCALVERSION=("[^"]*"|'\''[^'\'']*'\''|[^[:space:]]+)/LOCALVERSION=""/g' build.sh
           sed -i '/KBUILD_BUILD_USER=/d;/KBUILD_BUILD_HOST=/d' build.sh
 
-      - name: Compile and Package Kernel (No-Root / KSU-Next Manual-Hook No-SuSFS / KSU-Next Manual-Hook SuSFS)
+      - name: Compile and Package Kernel (KSU-Next Manual-Hook No-SuSFS / KSU-Next Manual-Hook SuSFS)
         id: build
         run: |
           chmod +x build.sh
@@ -1274,43 +1273,11 @@ jobs:
           }
 
           # ==========================================
-          # 1. BUILD NO-ROOT
-          # ==========================================
-          if [ "$BUILD_TYPE" = "noroot" ] || [ "$BUILD_TYPE" = "all" ]; then
-            echo "=========================================="
-            echo ">>> [1/3] Đang build bản No-Root..."
-            echo "=========================================="
-            cp "${MUNCH_CFG}.bak" "$MUNCH_CFG"
-            sed -i '/^CONFIG_KSU/d;/^# CONFIG_KSU/d' "$MUNCH_CFG"
-            sed -i '/^CONFIG_IKCONFIG/d;/^# CONFIG_IKCONFIG/d;/^CONFIG_KALLSYMS_ALL/d' "$MUNCH_CFG"
-            cat << 'EOF' >> "$MUNCH_CFG"
-          # CONFIG_KSU is not set
-          # CONFIG_KSU_SUSFS is not set
-          # CONFIG_IKCONFIG is not set
-          # CONFIG_IKCONFIG_PROC is not set
-          # CONFIG_KALLSYMS_ALL is not set
-          EOF
-
-            rm -rf out/aosp out/stock out/*.zip
-            CLANG_PATH="${GITHUB_WORKSPACE}/clang" ./build.sh "$VARIANT"
-
-            verify_config_flag must_off CONFIG_KSU
-            verify_config_flag must_off CONFIG_IKCONFIG_PROC
-            print_kernel_release
-
-            for f in out/*.zip; do
-              [ -e "$f" ] || continue
-              base=$(basename "$f" .zip)
-              mv "$f" "release_zips/${base}-noroot.zip"
-            done
-          fi
-
-          # ==========================================
-          # 2. BUILD KSU-NEXT NO-SUSFS (Manual Hook - Không sửa sys_call_table)
+          # 1. BUILD KSU-NEXT NO-SUSFS (Manual Hook - Không sửa sys_call_table)
           # ==========================================
           if [ "$BUILD_TYPE" = "ksun-nosusfs" ] || [ "$BUILD_TYPE" = "all" ]; then
             echo "=========================================="
-            echo ">>> [2/3] Đang patch Manual Hook & build KernelSU-Next (No-SuSFS)..."
+            echo ">>> [1/2] Đang patch Manual Hook & build KernelSU-Next (No-SuSFS)..."
             echo "=========================================="
             python3 /tmp/apply_ksun_manual_hook.py "$GITHUB_WORKSPACE"
 
@@ -1346,11 +1313,11 @@ jobs:
           fi
 
           # ==========================================
-          # 3. BUILD KSU-NEXT SUSFS (Manual Hook + SuSFS mới nhất)
+          # 2. BUILD KSU-NEXT SUSFS (Manual Hook + SuSFS mới nhất)
           # ==========================================
           if [ "$BUILD_TYPE" = "ksun-susfs" ] || [ "$BUILD_TYPE" = "all" ]; then
             echo "=========================================="
-            echo ">>> [3/3] Đang chuẩn bị & build KernelSU-Next (Manual Hook + SuSFS)..."
+            echo ">>> [2/2] Đang chuẩn bị & build KernelSU-Next (Manual Hook + SuSFS)..."
             echo "=========================================="
 
             if ! grep -rq "config KSU_SUSFS" drivers/kernelsu/ KernelSU-Next/ KernelSU/ fs/ 2>/dev/null; then
